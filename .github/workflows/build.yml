@@ -12,12 +12,22 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm64
+          - name: macos-x64
+            os: macos-13
+          - name: macos-arm64
+            os: macos-14
+          - name: windows-x64
+            os: windows-latest
 
     env:
       RELEASE_DIR: release-64
@@ -27,7 +37,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust toolchain (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -43,8 +53,16 @@ jobs:
           target: x86_64-pc-windows-gnu
           override: true
 
+      - name: Set up Rust toolchain (macOS)
+        if: startsWith(matrix.os, 'macos')
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -55,6 +73,19 @@ jobs:
             libcurl4-openssl-dev \
             libsqlite3-dev \
             libglew-dev
+
+      - name: Install macOS dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew update
+          brew install \
+            boost \
+            gmp \
+            libffi \
+            curl \
+            sqlite \
+            glew \
+            glfw
 
       - name: Install Windows build toolchain and dependencies
         if: matrix.os == 'windows-latest'
@@ -80,12 +111,12 @@ jobs:
           echo CXXFLAGS=-std=c++20 -fcoroutines >> %GITHUB_ENV%
           echo CFLAGS=-std=c11 >> %GITHUB_ENV%
 
-      - name: Make scripts executable (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Make scripts executable (POSIX)
+        if: matrix.os != 'windows-latest'
         run: chmod +x build_crossbasic.sh build_xcompile.sh build_appserver.sh build_plugins.sh
 
-      - name: Build on Linux
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build on Linux/macOS
+        if: matrix.os != 'windows-latest'
         run: |
           ./build_crossbasic.sh
           ./build_xcompile.sh
@@ -109,6 +140,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crossbasic-${{ matrix.os }}
+          name: crossbasic-${{ matrix.name }}
           path: ${{ env.RELEASE_DIR }}
           if-no-files-found: error

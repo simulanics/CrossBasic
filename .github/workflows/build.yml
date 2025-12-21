@@ -23,9 +23,9 @@ jobs:
           - name: linux-arm64
             os: ubuntu-24.04-arm64
           - name: macos-x64
-            os: macos-13
+            os: macos-15-intel
           - name: macos-arm64
-            os: macos-14
+            os: macos-latest
           - name: windows-x64
             os: windows-latest
 
@@ -82,10 +82,16 @@ jobs:
             boost \
             gmp \
             libffi \
+            pkg-config \
             curl \
             sqlite \
             glew \
             glfw
+
+          prefix=$(brew --prefix libffi)
+          echo "CPATH=$prefix/include:$CPATH" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$prefix/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
 
       - name: Install Windows build toolchain and dependencies
         if: matrix.os == 'windows-latest'

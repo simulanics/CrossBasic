@@ -16,7 +16,7 @@ Class Pair
   End Sub
 
   // Overloaded constructor to initialize left and right values directly
-  Sub Constructor(leftValue As Variant, rightValue As Variant)
+  Sub Constructor_2(leftValue As Variant, rightValue As Variant)
     Self.LeftValue = leftValue
     Self.RightValue = rightValue
   End Sub
@@ -30,9 +30,8 @@ Print(p.LeftValue + p.RightValue)  // Output: hello world.
 
 // Create another Pair using the overloaded constructor
 Var c As New Pair
-c.Constructor(30, 40)
-Print(Str(c.LeftValue))   // Output: 30
-Print(Str(c.RightValue))  // Output: 40
+c.Constructor_2(30, 40)
+Print(str(c.LeftValue) + ", " + str(c.RightValue))  // Output: 30, 40
 
 // Store both Pair instances in a Variant array
 Var vpairs() As Variant
@@ -40,4 +39,5 @@ vpairs.Add(p)
 vpairs.Add(c)
 
 // Access properties through the Variant array (auto-unboxing)
-Print(vpairs(0).LeftValue)  // Output: hello 
+Print("Auto-unboxing: " + vpairs(0).LeftValue)  // Output: hello 
+Print("Auto-unboxing: " + str(vpairs(1).LeftValue))  // Output: 30 

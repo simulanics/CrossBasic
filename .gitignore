@@ -11,7 +11,6 @@ Plugins/GUICPP/XGUI.dll.manifest
 workspace.code-workspace
 *.exe
 *.zip
-*.dll
 /AITeamReviewing
 *.xojo_uistate
 *.d
@@ -28,10 +27,10 @@ workspace.code-workspace
 *.a
 /Website
 *.so
-release-64-linux/amortizationschedule.csv
-release-64-linux/example.txt
-release-64-linux/example.bin
-release-64-linux/mydb.sqlite
-release-64-linux/Scripts/code.txt
 /release-64-linux
 /release-64-windows
+/release-64-linux2
+Scripts/code.txt
+Scripts/code.txt
+Plugins/SQLiteDatabase/deps/sqlite3.dll
+Plugins/LLMConnection/deps/libcurl-x64.dll

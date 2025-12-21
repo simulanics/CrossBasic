@@ -1,0 +1,1 @@
+g++ -std=c++17 -shared -m64 -static -static-libgcc -static-libstdc++ -s -o FileWatcher.dll FileWatcher.cpp -I. -pthread -luser32 -lole32 -loleaut32 -luuid -lcomdlg32 -lcomctl32 -ldwmapi -lgdi32 -ladvapi32 -lshell32 -lshlwapi -lversion

@@ -233,32 +233,6 @@ std::string toLower(const std::string& s) {
     return ret;
 }
 
-// ----------------------------------------------------------------------------  
-// Helper: Return a string naming the underlying type of a Value.
-// ----------------------------------------------------------------------------
-std::string getTypeName(const Value& v) {
-    struct TypeVisitor {
-        std::string operator()(std::monostate) const { return "nil"; }
-        std::string operator()(int) const { return "int"; }
-        std::string operator()(double) const { return "double"; }
-        std::string operator()(bool) const { return "bool"; }
-        std::string operator()(const std::string&) const { return "string"; }
-        std::string operator()(const Color&) const { return "Color"; }
-        std::string operator()(const std::shared_ptr<ObjFunction>&) const { return "ObjFunction"; }
-        std::string operator()(const std::shared_ptr<ObjClass>&) const { return "ObjClass"; }
-        std::string operator()(const std::shared_ptr<ObjInstance>&) const { return "ObjInstance"; }
-        std::string operator()(const std::shared_ptr<ObjArray>&) const { return "ObjArray"; }
-        std::string operator()(const std::shared_ptr<ObjBoundMethod>&) const { return "ObjBoundMethod"; }
-        std::string operator()(const BuiltinFn&) const { return "BuiltinFn"; }
-        std::string operator()(const PropertiesType&) const { return "PropertiesType"; }
-        std::string operator()(const std::vector<std::shared_ptr<ObjFunction>>&) const { return "OverloadedFunctions"; }
-        std::string operator()(const std::shared_ptr<ObjModule>&) const { return "ObjModule"; }
-        std::string operator()(const std::shared_ptr<ObjEnum>&) const { return "ObjEnum"; }
-        std::string operator()(void* ptr) const { return "pointer"; }
-    } visitor;
-    return std::visit(visitor, v);
-}
-
 // ============================================================================  
 // Parameter structure for functions/methods
 // ============================================================================
@@ -375,7 +349,7 @@ enum class XTokenType {
     IF, THEN, ELSE, ELSEIF,
     FOR, TO, DOWNTO, STEP, NEXT,
     WHILE, WEND,
-    NOT, AND, OR,
+    NOT, AND, OR, XOR,
     LESS, LESS_EQUAL, GREATER, GREATER_EQUAL, NOT_EQUAL,
     EOF_TOKEN,
     CARET,  // '^'
@@ -557,6 +531,7 @@ private:
         else if (lowerText == "not")      type = XTokenType::NOT;
         else if (lowerText == "and")      type = XTokenType::AND;
         else if (lowerText == "or")       type = XTokenType::OR;
+        else if (lowerText == "xor")      type = XTokenType::XOR;
         else if (lowerText == "mod")      type = XTokenType::MOD;
         else if (lowerText == "true")     type = XTokenType::BOOLEAN_TRUE;
         else if (lowerText == "false")    type = XTokenType::BOOLEAN_FALSE;
@@ -699,6 +674,7 @@ enum OpCode {
     OP_EQ,
     OP_AND,
     OP_OR,
+    OP_XOR,
     OP_PRINT,
     OP_POP,
     OP_DEFINE_GLOBAL,
@@ -718,7 +694,9 @@ enum OpCode {
     OP_SET_PROPERTY,
     OP_PROPERTIES,
     OP_DUP,
-    OP_CONSTRUCTOR_END
+    OP_CONSTRUCTOR_END,
+    // Unary NOT
+    OP_NOT
 };
 
 std::string opcodeToString(int opcode) {
@@ -739,6 +717,7 @@ std::string opcodeToString(int opcode) {
     case OP_EQ:            return "OP_EQ";
     case OP_AND:           return "OP_AND";
     case OP_OR:            return "OP_OR";
+    case OP_XOR:           return "OP_XOR";
     case OP_PRINT:         return "OP_PRINT";
     case OP_POP:           return "OP_POP";
     case OP_DEFINE_GLOBAL: return "OP_DEFINE_GLOBAL";
@@ -759,6 +738,7 @@ std::string opcodeToString(int opcode) {
     case OP_PROPERTIES:    return "OP_PROPERTIES";
     case OP_DUP:           return "OP_DUP";
     case OP_CONSTRUCTOR_END: return "OP_CONSTRUCTOR_END";
+    case OP_NOT:           return "OP_NOT";
     default:               return "UNKNOWN";
     }
 }
@@ -791,6 +771,286 @@ Value pop(VM& vm) {
 
 
 Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk);
+
+
+
+// ============================================================================
+// Extension-method helpers
+// ============================================================================
+
+static inline std::string canonicalExtTypeName(const std::string& tRaw)
+{
+    std::string t = toLower(tRaw);
+
+    // Common aliases -> canonical keys used by extensionMethods
+    if (t == "int")      return "integer";
+    if (t == "integer")  return "integer";
+
+    if (t == "number")   return "double";
+    if (t == "double")   return "double";
+
+    if (t == "bool")     return "boolean";
+    if (t == "boolean")  return "boolean";
+
+    if (t == "str")      return "string";
+    if (t == "string")   return "string";
+
+    if (t == "ptr")      return "pointer";
+    if (t == "pointer")  return "pointer";
+
+    if (t == "color")    return "color";
+    if (t == "array")    return "array";
+
+    // If someone uses Extends on a class name, keep it as-is (lowercased)
+    return t;
+}
+
+static inline std::string extKeyFromValue(const Value& v)
+{
+    // Primitive/value types
+    if (holds<int>(v))                        return "integer";
+    if (holds<double>(v))                     return "double";
+    if (holds<bool>(v))                       return "boolean";
+    if (holds<std::string>(v))                return "string";
+    if (holds<Color>(v))                      return "color";
+    if (holds<void*>(v))                      return "pointer";
+    if (holds<std::shared_ptr<ObjArray>>(v))  return "array";
+
+    // Allow Extends on classes too (by class name)
+    if (holds<std::shared_ptr<ObjInstance>>(v)) {
+        auto inst = getVal<std::shared_ptr<ObjInstance>>(v);
+        return canonicalExtTypeName(inst->klass ? inst->klass->name : "");
+    }
+
+    return "";
+}
+
+// Returns a callable that is already "bound" to receiver (like a bound method).
+// If no extension method exists, returns nil (monostate).
+// static inline Value bindExtensionMethod(VM& vm,
+//                                         const Value& receiver,
+//                                         const std::string& methodLower)
+// {
+//     const std::string key = canonicalExtTypeName(extKeyFromValue(receiver));
+//     if (key.empty()) return Value(std::monostate{});
+
+//     auto itType = vm.extensionMethods.find(key);
+//     if (itType == vm.extensionMethods.end()) return Value(std::monostate{});
+
+//     auto itMeth = itType->second.find(methodLower);
+//     if (itMeth == itType->second.end()) return Value(std::monostate{});
+
+//     Value target = itMeth->second;
+
+//     // In your compiler you store a BuiltinFn wrapper for extensions, so bind it here.
+//     if (holds<BuiltinFn>(target)) {
+//         BuiltinFn fn = getVal<BuiltinFn>(target);
+
+//         BuiltinFn bound = [fn, receiver](const std::vector<Value>& args) -> Value {
+//             std::vector<Value> full;
+//             full.reserve(args.size() + 1);
+//             full.push_back(receiver);                 // receiver becomes args[0]
+//             full.insert(full.end(), args.begin(), args.end());
+//             return fn(full);
+//         };
+
+//         return Value(bound);
+//     }
+
+//     // If you ever store raw ObjFunction for extensions, you can handle it here.
+//     if (holds<std::shared_ptr<ObjFunction>>(target)) {
+//         auto fnObj = getVal<std::shared_ptr<ObjFunction>>(target);
+//         BuiltinFn bound = [fnObj, receiver](const std::vector<Value>& args) -> Value {
+//             if (!globalVM) runtimeError("No active VM for extension call.");
+
+//             auto previousEnv = globalVM->environment;
+//             auto localEnv    = std::make_shared<Environment>(globalVM->globals);
+//             globalVM->environment = localEnv;
+
+//             // Make receiver available as `self` (or bind however you like)
+//             localEnv->define("self", receiver);
+
+//             // Bind parameters by position: receiver + args
+//             // (if you want tighter binding to fnObj->params, you can extend this)
+//             Value result = runVM(*globalVM, fnObj->chunk);
+//             globalVM->environment = previousEnv;
+//             return result;
+//         };
+//         return Value(bound);
+//     }
+
+//     return Value(std::monostate{});
+// }
+
+// Helper: bind extension methods for any receiver type.
+// Looks up vm.extensionMethods[bucket][methodLower] where bucket is chosen
+// from runtime type name and per-type synonyms (integer, double, boolean,
+// string, array, plugin/instance, and a generic "object" bucket).
+//
+// Returns:
+//   - Value(BuiltinFn)  : a callable with the receiver pre-pended to args
+//   - Value(ObjBoundMethod) : for scripted extension functions
+//   - Value(std::monostate{}): if not found
+//
+Value bindExtensionMethod(VM& vm, const Value& receiver, const std::string& methodLower)
+{
+    std::vector<std::string> buckets;
+
+    // Primary type name from your runtime helper (e.g. "Integer", "String", "Color")
+    std::string typeName = toLower(getTypeName(receiver));
+    if (!typeName.empty()) {
+        buckets.push_back(typeName); // e.g. "integer", "string", "color"
+    }
+
+    // ---- Per-variant synonyms ------------------------------------------------
+    if (holds<int>(receiver)) {
+        // numeric aliases
+        buckets.push_back("integer");
+        buckets.push_back("int");
+        buckets.push_back("i32");
+        buckets.push_back("i64");
+        buckets.push_back("number");
+
+        // If this int is actually used as a Color (typeName == "color")
+        if (typeName == "color" || typeName == "colour") {
+            buckets.push_back("color");
+        }
+    }
+    else if (holds<double>(receiver)) {
+        buckets.push_back("double");
+        buckets.push_back("float");
+        buckets.push_back("f32");
+        buckets.push_back("f64");
+        buckets.push_back("number");
+        buckets.push_back("numeric");
+    }
+    else if (holds<bool>(receiver)) {
+        buckets.push_back("boolean");
+        buckets.push_back("bool");
+    }
+    else if (holds<std::string>(receiver)) {
+        buckets.push_back("string");
+        buckets.push_back("str");
+        buckets.push_back("text");
+    }
+    else if (holds<std::shared_ptr<ObjArray>>(receiver)) {
+        buckets.push_back("array");
+        buckets.push_back("list");
+    }
+    else if (holds<std::shared_ptr<ObjInstance>>(receiver)) {
+        auto inst = getVal<std::shared_ptr<ObjInstance>>(receiver);
+        if (inst && inst->klass) {
+            // Class name like "Demo", "Color", "Socket", etc.
+            std::string clsNameLower = toLower(inst->klass->name);
+            if (!clsNameLower.empty())
+                buckets.push_back(clsNameLower);  // e.g. "demo", "color"
+
+            if (inst->klass->isPlugin) {
+                buckets.push_back("plugin");
+            }
+        }
+    }
+
+    // Always allow a generic "object" bucket last.
+    buckets.push_back("object");
+
+    // ---- Deduplicate buckets and search vm.extensionMethods ------------------
+    std::unordered_set<std::string> seen;
+    for (const std::string& bucket : buckets) {
+        if (bucket.empty()) continue;
+        if (!seen.insert(bucket).second) continue; // already tried this bucket
+
+        auto bIt = vm.extensionMethods.find(bucket);
+        if (bIt == vm.extensionMethods.end())
+            continue;
+
+        auto& methods = bIt->second;
+        auto mIt = methods.find(methodLower);
+        if (mIt == methods.end())
+            continue;
+
+        Value fnVal = mIt->second;
+
+        // Case 1: extension is a builtin function
+        if (holds<BuiltinFn>(fnVal)) {
+            BuiltinFn fn = getVal<BuiltinFn>(fnVal);
+            // Pre-bind 'receiver' as first argument
+            BuiltinFn bound = [fn, receiver](const std::vector<Value>& args) -> Value {
+                std::vector<Value> full;
+                full.reserve(args.size() + 1);
+                full.push_back(receiver);          // Extends receiver
+                full.insert(full.end(), args.begin(), args.end());
+                return fn(full);
+            };
+            return Value(bound);
+        }
+
+        // Case 2: extension is a scripted function (ObjFunction)
+        if (holds<std::shared_ptr<ObjFunction>>(fnVal)) {
+            auto bm = std::make_shared<ObjBoundMethod>();
+            bm->receiver = receiver;
+            bm->name     = methodLower;
+            return Value(bm);
+        }
+
+        // Unexpected type stored in extensionMethods; ignore and continue
+    }
+
+    // Not found
+    return Value(std::monostate{});
+}
+
+
+static bool tryGetEnumMember(const Value& receiver, const std::string& propLower, Value& out)
+{
+    if (!holds<std::shared_ptr<ObjEnum>>(receiver)) return false;
+
+    auto e = getVal<std::shared_ptr<ObjEnum>>(receiver);
+    if (!e) return false;
+
+    // Optional: expose enum name
+    if (propLower == "name") {
+        out = Value(e->name);
+        return true;
+    }
+
+    auto it = e->members.find(propLower);
+    if (it == e->members.end())
+        return false;
+
+    out = Value((int)it->second);
+    return true;
+}
+
+
+
+
+// ----------------------------------------------------------------------------  
+// Helper: Return a string naming the underlying type of a Value.
+// ----------------------------------------------------------------------------
+std::string getTypeName(const Value& v) {
+    struct TypeVisitor {
+        std::string operator()(std::monostate) const { return "nil"; }
+        std::string operator()(int) const { return "int"; }
+        std::string operator()(double) const { return "double"; }
+        std::string operator()(bool) const { return "bool"; }
+        std::string operator()(const std::string&) const { return "string"; }
+        std::string operator()(const Color&) const { return "Color"; }
+        std::string operator()(const std::shared_ptr<ObjFunction>&) const { return "ObjFunction"; }
+        std::string operator()(const std::shared_ptr<ObjClass>&) const { return "ObjClass"; }
+        std::string operator()(const std::shared_ptr<ObjInstance>&) const { return "ObjInstance"; }
+        std::string operator()(const std::shared_ptr<ObjArray>&) const { return "ObjArray"; }
+        std::string operator()(const std::shared_ptr<ObjBoundMethod>&) const { return "ObjBoundMethod"; }
+        std::string operator()(const BuiltinFn&) const { return "BuiltinFn"; }
+        std::string operator()(const PropertiesType&) const { return "PropertiesType"; }
+        std::string operator()(const std::vector<std::shared_ptr<ObjFunction>>&) const { return "OverloadedFunctions"; }
+        std::string operator()(const std::shared_ptr<ObjModule>&) const { return "ObjModule"; }
+        std::string operator()(const std::shared_ptr<ObjEnum>&) const { return "ObjEnum"; }
+        std::string operator()(void* ptr) const { return "pointer"; }
+    } visitor;
+    return std::visit(visitor, v);
+}
+
 
 
 
@@ -1065,7 +1325,7 @@ BuiltinFn addHandlerBuiltin = [](const std::vector<Value>& args) -> Value
 // ============================================================================  
 // AST Definitions: Expressions
 // ============================================================================
-enum class BinaryOp { ADD, SUB, MUL, DIV, LT, LE, GT, GE, NE, EQ, AND, OR, POW, MOD };
+enum class BinaryOp { ADD, SUB, MUL, DIV, LT, LE, GT, GE, NE, EQ, AND, OR, XOR, POW, MOD };
 
 struct Expr { virtual ~Expr() = default; };
 
@@ -1967,12 +2227,22 @@ private:
         return expr;
     }
 
-    // ------------ logical OR / AND precedence ------------
+
+    // ------------ logical OR / XOR / AND precedence ------------
     std::shared_ptr<Expr> orExpr() {
-        auto expr = andExpr();
+        auto expr = xorExpr();
         while (match({XTokenType::OR})) {
-            auto rhs = andExpr();
+            auto rhs = xorExpr();
             expr = std::make_shared<BinaryExpr>(expr, BinaryOp::OR, rhs);
+        }
+        return expr;
+    }
+
+    std::shared_ptr<Expr> xorExpr() {
+        auto expr = andExpr();
+        while (match({XTokenType::XOR})) {
+            auto rhs = andExpr();
+            expr = std::make_shared<BinaryExpr>(expr, BinaryOp::XOR, rhs);
         }
         return expr;
     }
@@ -3018,10 +3288,15 @@ private:
 
 
                 // (d) Store in VM.registry[type][method]
+                // vm.extensionMethods
+                // [ funcStmt->extendedType ]              // e.g. "string"
+                // [ toLower(funcStmt->name) ]             // e.g. "contains"
+                // = Value(extWrapper);
                 vm.extensionMethods
-                [ funcStmt->extendedType ]              // e.g. "string"
-                [ toLower(funcStmt->name) ]             // e.g. "contains"
+                [ canonicalExtTypeName(funcStmt->extendedType) ]
+                [ toLower(funcStmt->name) ]
                 = Value(extWrapper);
+
 
                 // ── NEW: export public extension methods out of the module ──────────
                 if (compilingModule && funcStmt->access == AccessModifier::PUBLIC) {
@@ -3210,8 +3485,14 @@ private:
         }
         else if (auto un = std::dynamic_pointer_cast<UnaryExpr>(expr)) {
             compileExpr(un->right, chunk);
-            if (un->op == "-")
+
+            if (un->op == "-") {
                 emit(chunk, OP_NEGATE);
+            } else if (un->op == "not") {
+                emit(chunk, OP_NOT);
+            } else {
+                runtimeError("Compiler: Unknown unary operator: " + un->op);
+            }
         }
         else if (auto assignExpr = std::dynamic_pointer_cast<AssignmentExpr>(expr)) {
             compileExpr(std::make_shared<VariableExpr>(assignExpr->name), chunk);
@@ -3242,6 +3523,7 @@ private:
             case BinaryOp::EQ:  emit(chunk, OP_EQ); break;
             case BinaryOp::AND: emit(chunk, OP_AND); break;
             case BinaryOp::OR:  emit(chunk, OP_OR); break;
+            case BinaryOp::XOR: emit(chunk, OP_XOR); break;
             case BinaryOp::POW: emit(chunk, OP_POW); break;
             case BinaryOp::MOD: emit(chunk, OP_MOD); break;
             default: break;
@@ -3552,6 +3834,29 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             vm.stack.push_back(ab || bb);
             break;
         }
+
+        case OP_XOR: {
+            Value b = pop(vm), a = pop(vm);
+
+            // Boolean XOR (logical)
+            if (holds<bool>(a) && holds<bool>(b)) {
+                bool av = getVal<bool>(a);
+                bool bv = getVal<bool>(b);
+                vm.stack.push_back(Value(av != bv));
+                break;
+            }
+
+            // Integer XOR (bitwise)
+            if (holds<int>(a) && holds<int>(b)) {
+                vm.stack.push_back(Value(getVal<int>(a) ^ getVal<int>(b)));
+                break;
+            }
+
+            runtimeError("VM: Xor expects (Boolean, Boolean) or (Integer, Integer).");
+            break;
+        }
+
+
         case OP_PRINT: {
             Value v = pop(vm);
             std::cout << valueToString(v) << std::endl;
@@ -3900,23 +4205,8 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
                     runtimeError("VM: Bound method receiver is of unsupported type.");
                 }
             }
-        
-            // -----------------  ARRAY INDEXING  --------------------------------------
-            // else if (holds<std::shared_ptr<ObjArray>>(callee)) {
-            //     auto array = getVal<std::shared_ptr<ObjArray>>(callee);
-            //     if (argCount != 1) {
-            //         runtimeError("VM: Array call expects exactly 1 argument for indexing.");
-            //     }
-            //     Value indexVal = args[0];
-            //     if (!holds<int>(indexVal)) {
-            //         runtimeError("VM: Array index must be an integer.");
-            //     }
-            //     int index = getVal<int>(indexVal);
-            //     if (index < 0 || index >= (int)array->elements.size()) {
-            //         runtimeError("VM: Array index out of bounds.");
-            //     }
-            //     vm.stack.push_back(array->elements[index]);
-            // }
+
+            // -----------------------  ARRAY CALL  -----------------------------------
             else if (holds<std::shared_ptr<ObjArray>>(callee)) {
                 auto array = getVal<std::shared_ptr<ObjArray>>(callee);
 
@@ -4187,151 +4477,221 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             debugLog("VM: Created array with " + std::to_string(count) + " elements.");
             break;
         }
-        case OP_GET_PROPERTY: {
-            int nameIndex = chunk.code[ip++];
-            Value propNameVal = chunk.constants[nameIndex];
-            if (!holds<std::string>(propNameVal))
-                runtimeError("VM: Property name must be a string.");
-            std::string propName = toLower(getVal<std::string>(propNameVal));
-            Value object = pop(vm);
 
-            if (holds<std::shared_ptr<ObjInstance>>(object)) {
-                auto instance = getVal<std::shared_ptr<ObjInstance>>(object);
-                std::string key = toLower(propName);
-                // FIRST, check instance fields
-                if (instance->fields.find(key) != instance->fields.end()) {
-                    vm.stack.push_back(instance->fields[key]);
+
+        case OP_GET_PROPERTY:
+        {
+            // constant index of the property name
+            int nameIndex = chunk.code[ip++];
+            if (nameIndex < 0 || nameIndex >= (int)chunk.constants.size() ||
+                !holds<std::string>(chunk.constants[nameIndex]))
+            {
+                runtimeError("OP_GET_PROPERTY: name constant is not a string");
+            }
+
+            std::string name      = getVal<std::string>(chunk.constants[nameIndex]);
+            std::string lowerName = toLower(name);
+
+            if (vm.stack.empty())
+                runtimeError("OP_GET_PROPERTY: stack underflow");
+
+            // Object whose property/method we’re accessing
+            Value receiver = pop(vm);
+
+
+            // --------------------------------------------------------
+            // 0) Enums – EnumName.Member
+            // --------------------------------------------------------
+            {
+                Value enumOut;
+                if (tryGetEnumMember(receiver, lowerName, enumOut)) {
+                    vm.stack.push_back(enumOut);
+                    break;
                 }
-                else if (instance->klass->isPlugin) {
-                    // For plugin instances, now check pluginProperties
-                    auto it = instance->klass->pluginProperties.find(key);
-                    if (it != instance->klass->pluginProperties.end()) {
-                        int handle = static_cast<int>(reinterpret_cast<intptr_t>(instance->pluginInstance));
-                        BuiltinFn getter = it->second.first;
+            }
+
+            // --------------------------------------------------------
+            // 1) Instance fields / methods (including plugin classes)
+            // --------------------------------------------------------
+            if (holds<std::shared_ptr<ObjInstance>>(receiver)) {
+                auto inst  = getVal<std::shared_ptr<ObjInstance>>(receiver);
+                auto klass = inst ? inst->klass : nullptr;
+
+                // Instance fields first
+                if (inst) {
+                    auto fIt = inst->fields.find(lowerName);
+                    if (fIt != inst->fields.end()) {
+                        vm.stack.push_back(fIt->second);
+                        break;
+                    }
+                }
+
+                // Plugin-backed properties (getter)
+                if (inst && klass && klass->isPlugin) {
+                    auto pit = klass->pluginProperties.find(lowerName);
+                    if (pit != klass->pluginProperties.end()) {
+                        BuiltinFn getter = pit->second.first;
+                        if (!getter)
+                            runtimeError("Property '" + name + "' does not have a getter.");
+
+                        int handle = static_cast<int>(reinterpret_cast<intptr_t>(inst->pluginInstance));
                         Value result = getter({ Value(handle) });
                         vm.stack.push_back(result);
-                    } 
-                    // Next, check if the plugin class defines a method with this name
-                    else if (instance->klass->methods.find(key) != instance->klass->methods.end()) {
-                        auto bound = std::make_shared<ObjBoundMethod>();
-                        bound->receiver = object;
-                        bound->name = key;
-                        vm.stack.push_back(Value(bound));
+                        break;
                     }
-                    else {
-                        if (key == "constructor") {                // <– NEW guard
-                            vm.stack.push_back(Value(std::monostate{}));     // acts like “no ctor”
-                        } else {
-                            int handle = static_cast<int>(reinterpret_cast<intptr_t>(instance->pluginInstance));
-                            std::string target = instance->klass->name + ":" +
-                                                 std::to_string(handle) + ":" + key;
-                            vm.stack.push_back(Value(target));
+                }
+
+                // Class methods
+                if (inst && klass) {
+                    auto mit = klass->methods.find(lowerName);
+                    if (mit != klass->methods.end()) {
+                        Value methVal = mit->second;
+
+                        // Plugin methods – bind the handle as the first arg.
+                        if (klass->isPlugin && holds<BuiltinFn>(methVal)) {
+                            BuiltinFn raw = getVal<BuiltinFn>(methVal);
+                            int handle = static_cast<int>(reinterpret_cast<intptr_t>(inst->pluginInstance));
+                            BuiltinFn bound = [raw, handle](const std::vector<Value>& args) -> Value {
+                                std::vector<Value> full;
+                                full.reserve(args.size() + 1);
+                                full.emplace_back(handle);
+                                full.insert(full.end(), args.begin(), args.end());
+                                return raw(full);
+                            };
+                            vm.stack.push_back(Value(bound));
+                            break;
                         }
-                    }
-                    
-                }
-                else {
-                    // Non-plugin instance branch
-                    if (instance->fields.find(key) != instance->fields.end()) {
-                        vm.stack.push_back(instance->fields[key]);
-                    } else if (instance->klass && instance->klass->methods.find(key) != instance->klass->methods.end()) {
-                        auto bound = std::make_shared<ObjBoundMethod>();
-                        bound->receiver = object;
-                        bound->name = key;
-                        vm.stack.push_back(Value(bound));
-                    } else if (key == "tostring") {
-                        vm.stack.push_back(Value(valueToString(object)));
-                    } else {
-                        if (key == "constructor") {
-                            vm.stack.push_back(Value(std::monostate{}));
-                        } else {
-                            runtimeError("VM: NilObjectException for property: " + propName);
-                        }
+
+                        // Scripted method – return bound-method object
+                        auto bm = std::make_shared<ObjBoundMethod>();
+                        bm->receiver = receiver;
+                        bm->name     = lowerName;
+                        vm.stack.push_back(Value(bm));
+                        break;
                     }
                 }
-            
-            //Module Extends lookups
-            } else if (holds<std::shared_ptr<ObjArray>>(object)) {
-                // ─── NEW: module extension lookup ───────────────────
-                auto &exts = vm.extensionMethods["array"];
-                auto it   = exts.find(propName);
-                if (it != exts.end()) {
-                    auto bound = std::make_shared<ObjBoundMethod>();
-                    bound->receiver = object;
-                    bound->name     = propName;
-                    vm.stack.push_back(Value(bound));
-                    break;
-                }
-                auto array = getVal<std::shared_ptr<ObjArray>>(object);
-                auto bound = std::make_shared<ObjBoundMethod>();
-                bound->receiver = object;
-                bound->name = propName;
-                vm.stack.push_back(Value(bound));
-            } else if (holds<int>(object)) {
-                // ─── NEW: module extension lookup ───────────────────
-                auto &exts = vm.extensionMethods["integer"];
-                auto it   = exts.find(propName);
-                if (it != exts.end()) {
-                    auto bound = std::make_shared<ObjBoundMethod>();
-                    bound->receiver = object;
-                    bound->name     = propName;
-                    vm.stack.push_back(Value(bound));
-                    break;
-                }
-                if (propName == "tostring")
-                    vm.stack.push_back(Value(valueToString(object)));
-                else
-                    runtimeError("VM: Unknown property for integer: " + propName);
-            } else if (holds<double>(object)) {
-                // ─── NEW: module extension lookup ───────────────────
-                auto &exts = vm.extensionMethods["double"];
-                auto it   = exts.find(propName);
-                if (it != exts.end()) {
-                    auto bound = std::make_shared<ObjBoundMethod>();
-                    bound->receiver = object;
-                    bound->name     = propName;
-                    vm.stack.push_back(Value(bound));
-                    break;
-                }
-                if (propName == "tostring")
-                    vm.stack.push_back(Value(valueToString(object)));
-                else
-                    runtimeError("VM: Unknown property for double: " + propName);
-            } 
-            
-            else if (holds<std::string>(object)) {
-                std::string s = getVal<std::string>(object);
-                // ─── NEW: module extension lookup ───────────────────
-                auto &exts = vm.extensionMethods["string"];
-                auto it   = exts.find(propName);
-                if (it != exts.end()) {
-                    auto bound = std::make_shared<ObjBoundMethod>();
-                    bound->receiver = object;
-                    bound->name     = propName;
-                    vm.stack.push_back(Value(bound));
-                    break;
-                }
-                if (propName == "tostring")
-                    vm.stack.push_back(Value(s));
-                else
-                    runtimeError("VM: Unknown property for string: " + propName);
-            } else if (holds<std::shared_ptr<ObjModule>>(object)) {
-                auto module = getVal<std::shared_ptr<ObjModule>>(object);
-                std::string key = toLower(propName);
-                if (module->publicMembers.find(key) != module->publicMembers.end())
-                    vm.stack.push_back(module->publicMembers[key]);
-                else
-                    runtimeError("VM: NilObjectException module property: " + propName);
-            } else if (holds<std::shared_ptr<ObjEnum>>(object)) {
-                auto en = getVal<std::shared_ptr<ObjEnum>>(object);
-                std::string key = toLower(propName);
-                if (en->members.find(key) != en->members.end())
-                    vm.stack.push_back(en->members[key]);
-                else
-                    runtimeError("VM: NilObjectException enum member: " + propName);
-            } else {
-                runtimeError("VM: Property access on unsupported type.");
+
+                // If we fall through, we’ll still give extension methods a chance
+                // and then the legacy "constructor" / "tostring" / plugin fallback below.
             }
+
+            // --------------------------------------------------------
+            // 2) Arrays – expose methods (Add, Count, Join, etc.)
+            // --------------------------------------------------------
+            if (holds<std::shared_ptr<ObjArray>>(receiver)) {
+                auto arr = getVal<std::shared_ptr<ObjArray>>(receiver);
+
+                // Return a callable that dispatches to callArrayMethod(...)
+                BuiltinFn bound = [arr, lowerName](const std::vector<Value>& args) -> Value {
+                    return callArrayMethod(arr, lowerName, args);
+                };
+                vm.stack.push_back(Value(bound));
+                break;
+            }
+
+            // --------------------------------------------------------
+            // 3) Modules – module.member
+            // --------------------------------------------------------
+            if (holds<std::shared_ptr<ObjModule>>(receiver)) {
+                auto mod = getVal<std::shared_ptr<ObjModule>>(receiver);
+                auto it  = mod->publicMembers.find(lowerName);
+                if (it != mod->publicMembers.end()) {
+                    vm.stack.push_back(it->second);
+                    break;
+                }
+                // fall through for extension methods / constructor / tostring / plugin fallback
+            }
+
+            // --------------------------------------------------------
+            // 4) Classes – static methods
+            // --------------------------------------------------------
+            if (holds<std::shared_ptr<ObjClass>>(receiver)) {
+                auto cls = getVal<std::shared_ptr<ObjClass>>(receiver);
+                auto mit = cls->methods.find(lowerName);
+                if (mit != cls->methods.end()) {
+                    vm.stack.push_back(mit->second);
+                    break;
+                }
+                // fall through for extension methods / constructor / tostring / plugin fallback
+            }
+
+            // --------------------------------------------------------
+            // 5) EXTENSION METHODS on primitives (Integer, Double, String, …)
+            // --------------------------------------------------------
+            {
+                Value ext = bindExtensionMethod(vm, receiver, lowerName);
+                if (!holds<std::monostate>(ext)) {
+                    // ext is already a callable (BuiltinFn) bound to this receiver.
+                    vm.stack.push_back(ext);
+                    break;
+                }
+            }
+
+            // --------------------------------------------------------
+            // 5.5) Legacy ".constructor" sentinel
+            //
+            // Older bytecode and the plugin class machinery sometimes probe
+            // `.constructor` just to see if anything is there. Historically this
+            // did NOT throw – it pushed a "no ctor" sentinel instead.
+            // --------------------------------------------------------
+            if (lowerName == "constructor") {
+                vm.stack.push_back(Value(std::monostate{})); // "no ctor" sentinel
+                break;
+            }
+
+            // --------------------------------------------------------
+            // 6) Built-in .tostring on core types (after extensions / ctor)
+            //
+            // Mirrors the old behavior:
+            //   - String: returns the raw string (no extra quoting)
+            //   - Int/Double/Arrays/Instances/etc: valueToString(receiver)
+            // --------------------------------------------------------
+            if (lowerName == "tostring") {
+                if (holds<std::string>(receiver)) {
+                    // Old semantics: for string, just return the string itself.
+                    const std::string& s = getVal<std::string>(receiver);
+                    vm.stack.push_back(Value(s));
+                } else {
+                    vm.stack.push_back(Value(valueToString(receiver)));
+                }
+                break;
+            }
+
+            // --------------------------------------------------------
+            // 7) Optional: built-in string helpers AFTER extension / tostring
+            // --------------------------------------------------------
+            if (holds<std::string>(receiver)) {
+                const std::string& s = getVal<std::string>(receiver);
+
+                if (lowerName == "length") {
+                    vm.stack.push_back((int)s.size());
+                    break;
+                }
+                // Add other built-in string properties/methods here if needed.
+            }
+
+            // --------------------------------------------------------
+            // 8) FINAL PLUGIN INSTANCE FALLBACK (for things like ".handle")
+            //
+            // This restores the old behavior:
+            //   unknown plugin property ⇒ "ClassName:handle:propName"
+            // so that ClassObject.handle and similar patterns work.
+            // --------------------------------------------------------
+            if (holds<std::shared_ptr<ObjInstance>>(receiver)) {
+                auto inst  = getVal<std::shared_ptr<ObjInstance>>(receiver);
+                auto klass = inst ? inst->klass : nullptr;
+                if (inst && klass && klass->isPlugin) {
+                    int handle = static_cast<int>(reinterpret_cast<intptr_t>(inst->pluginInstance));
+                    std::string target = klass->name + ":" +
+                                        std::to_string(handle) + ":" +
+                                        lowerName;
+                    vm.stack.push_back(Value(target));
+                    break;
+                }
+            }
+
+            // If nothing matched, this really is an error.
+            runtimeError("Undefined property or method '" + name + "'");
             break;
         }
 
@@ -4373,7 +4733,6 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
         }
 
 
-
         case OP_CONSTRUCTOR_END: {
             if (vm.stack.size() < 2)
                 runtimeError("VM: Not enough values for constructor end.");
@@ -4385,6 +4744,41 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
                 vm.stack.push_back(constructorResult);
             break;
         }
+
+
+        case OP_NOT: {
+            Value v = pop(vm);
+
+            // Boolean NOT
+            if (holds<bool>(v)) {
+                vm.stack.push_back(!getVal<bool>(v));
+                break;
+            }
+
+            // Integer NOT (bitwise complement)
+            if (holds<int>(v)) {
+                vm.stack.push_back(~getVal<int>(v));
+                break;
+            }
+
+            // Optional: allow whole-number doubles by coercing to int
+            if (holds<double>(v)) {
+                double d = getVal<double>(v);
+                double ipart;
+                if (std::modf(d, &ipart) == 0.0 &&
+                    ipart >= (double)std::numeric_limits<int>::min() &&
+                    ipart <= (double)std::numeric_limits<int>::max())
+                {
+                    vm.stack.push_back(~(int)ipart);
+                    break;
+                }
+            }
+
+            runtimeError("VM: Operand must be Boolean or Integer for Not.");
+            break;
+        }
+
+
         default:
             break;
         }
@@ -5431,7 +5825,7 @@ std::string decrypt(const std::string &cipher, const std::string &keyStr) {
 
 
 // ============================================================================
-// For building the CrossBasic VM as a library for use with othe software.
+// For building the CrossBasic VM as a library for use with other software.
 // ============================================================================
 
 // Ensure this function is exported with C linkage.

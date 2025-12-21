@@ -1,1 +1,1 @@
-g++ -std=c++17 -shared -m64 -static -static-libgcc -static-libstdc++ -s -o XWebView.dll XWebView.cpp -I. -pthread -luser32 -lole32 -luuid -lcomctl32 -ldwmapi -lgdi32 -ladvapi32 -lshell32 -lshlwapi -lversion
+g++ -std=c++17 -shared -m64 -static -static-libgcc -static-libstdc++ -s -o XWebView.dll XWebView.cpp -I. -pthread -luser32 -lole32 -loleaut32 -luuid -lcomctl32 -ldwmapi -lgdi32 -ladvapi32 -lshell32 -lshlwapi -lversion

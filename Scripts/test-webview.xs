@@ -1,7 +1,7 @@
 // XWebViewDemo.cb
 // A simple CrossBasic demo using the XWebView plugin:
-// – Shows a window with Back, Forward, Reload, URL field and Go button
-// – Embeds a WebView filling most of the window
+// - Shows a window with Back, Forward, Reload, URL field and Go button
+// - Embeds a WebView filling most of the window
 
 // Create the main window
 Var win As New XWindow
@@ -27,8 +27,6 @@ webview.locktop = true
 webview.lockbottom = true
 webview.lockright = true
 webview.lockleft = true
-
-
 
 
 // Back button
@@ -133,11 +131,12 @@ Var jsFunction As String = "function calculateExpression(expression){try{if(!/^[
 
 
 Sub RunJS()
-	' TODO: ExecuteJavaScriptSync is currently binding and causing a crash.
-	'var content as String = webview.ExecuteJavascriptSync("document.title")
-		'jsFunction + "calculateExpression('3 + 4 * 2');")
-	'print(content)
-	webview.ExecuteJavascript(jsFunction + "alert('3 + 4 *2 = ' + calculateExpression('3 + 4 * 2'));")
+	
+	var content as String = webview.ExecuteJavascriptSync(jsFunction + " return calculateExpression('3 + 4 * 2');")
+	print("ExecuteJavaScriptSync Returned: " + content)
+
+	'Following line runs as expected.
+	webview.ExecuteJavascript("alert('3 + 4 *2 = ' + '" + content + "');")
 
 End Sub
 

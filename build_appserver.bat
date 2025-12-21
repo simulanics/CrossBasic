@@ -2,7 +2,7 @@
 setlocal
 
 :: Compile server.cpp with metadata
-g++ ./CrossBasic-IDE/server.cpp -static-libgcc -static-libstdc++ -O3 -std=c++17 -s -static -l:libboost_system-mgw14-mt-s-x64-1_87.a -l:libboost_thread-mgw14-mt-s-x64-1_87.a -lws2_32 -lwsock32 -pthread -lz -o server.exe 2> error.log
+g++ ./CrossBasic-IDE/server.cpp -static-libgcc -static-libstdc++ -O3 -std=c++17 -s -static -lboost_system -lboost_thread -lws2_32 -lwsock32 -pthread -lz -o server.exe 2> error.log
 
 :: Check if compilation was successful
 if %ERRORLEVEL% NEQ 0 (

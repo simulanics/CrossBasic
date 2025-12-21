@@ -1,0 +1,82 @@
+name: Build CrossBasic
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      RELEASE_DIR: release-64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Set up Rust toolchain (Windows GNU)
+        if: matrix.os == 'windows-latest'
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: x86_64-pc-windows-gnu
+          override: true
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev
+
+      - name: Install Windows MinGW toolchain
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install mingw --version=13.1.0 -y
+          echo "C:\\ProgramData\\chocolatey\\lib\\mingw\\tools\\install\\mingw64\\bin" >> %GITHUB_PATH%
+
+      - name: Make scripts executable (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: chmod +x build_crossbasic.sh build_xcompile.sh build_appserver.sh build_plugins.sh
+
+      - name: Build on Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          ./build_crossbasic.sh
+          ./build_xcompile.sh
+          ./build_appserver.sh
+          ./build_plugins.sh
+
+      - name: Build on Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          call build_all_windows.bat
+        shell: cmd
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossbasic-${{ matrix.os }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error

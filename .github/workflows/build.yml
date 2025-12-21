@@ -71,7 +71,7 @@ jobs:
           "C:\\msys64\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "CPLUS_INCLUDE_PATH=$pwd\deps\Microsoft.Web.WebView2.1.0.2210.55\build\native\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          C:\msys64\usr\bin\bash -lc "for lib in system thread; do src=\$(ls /mingw64/lib/libboost_${lib}*.a | head -n1); cp \"$src\" /mingw64/lib/libboost_${lib}-mgw14-mt-s-x64-1_87.a; done"
+          C:\msys64\usr\bin\bash -lc 'for lib in system thread; do src=$(ls /mingw64/lib/libboost_${lib}*.a | head -n1); cp "$src" /mingw64/lib/libboost_${lib}-mgw14-mt-s-x64-1_87.a; done'
 
       - name: Set Windows build flags
         if: matrix.os == 'windows-latest'

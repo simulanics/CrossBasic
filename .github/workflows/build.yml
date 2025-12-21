@@ -47,13 +47,29 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libffi-dev
+          sudo apt-get install -y \
+            g++ \
+            libffi-dev \
+            libgmp-dev \
+            libboost-all-dev \
+            libcurl4-openssl-dev \
+            libsqlite3-dev \
+            libglew-dev
 
-      - name: Install Windows MinGW toolchain
+      - name: Install Windows build toolchain and dependencies
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          choco install mingw --version=13.1.0 -y
-          echo "C:\\ProgramData\\chocolatey\\lib\\mingw\\tools\\install\\mingw64\\bin" >> %GITHUB_PATH%
+          choco install nuget.commandline -y
+          choco install msys2 -y
+
+          C:\msys64\usr\bin\bash -lc "pacman --noconfirm -Sy"
+          C:\msys64\usr\bin\bash -lc "pacman --noconfirm -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-boost mingw-w64-x86_64-libffi mingw-w64-x86_64-gmp mingw-w64-x86_64-curl mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-glew mingw-w64-x86_64-cppwinrt"
+
+          nuget install Microsoft.Web.WebView2 -Version 1.0.2210.55 -OutputDirectory $pwd\deps
+
+          "C:\\msys64\\mingw64\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CPLUS_INCLUDE_PATH=$pwd\deps\Microsoft.Web.WebView2.1.0.2210.55\build\native\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Make scripts executable (Linux)
         if: matrix.os == 'ubuntu-latest'

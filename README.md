@@ -4,7 +4,7 @@ This is the very first cross-platform Compiler and VM written by AI and an Agent
 
 [![License: CBSL-1.1](https://img.shields.io/badge/license-CBSL--1.1-blue)](https://www.crossbasic.com/license)
 
-> 📜 **License:** This project is licensed under the [Business Source License 1.1 (BUSL-1.1)](./LICENSE.md). You may use CrossBasic to build your own projects, including commercially. You may not sell, fork, repackage, or monetize CrossBasic itself without permission. Contact [mcombatti@simulanics.com](mailto:mcombatti@simulanics.com) for commercial licensing.
+> 📜 **License:** This project is licensed under the [Business Source License 1.1 (BUSL-1.1)](./LICENSE). You may use CrossBasic to build your own projects, including commercially. You may not sell, fork, repackage, or monetize CrossBasic itself without permission. Contact [mcombatti@simulanics.com](mailto:mcombatti@simulanics.com) for commercial licensing.
 
 # What is CrossBasic?
 

@@ -173,7 +173,6 @@ While gl.ShouldClose() = False
   gl.DrawElements(GL_TRIANGLES, idxs.LastIndex() + 1, GL_UNSIGNED_INT, 0)
   gl.SwapGLBuffers()   // pass window handle if plugin supports embed
   gl.PollEvents()
-  Doevents(5)
 Wend
 
 ' while True

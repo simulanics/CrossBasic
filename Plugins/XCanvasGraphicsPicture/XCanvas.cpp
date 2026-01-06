@@ -26,6 +26,9 @@
 #include <random>
 #include <string>
 #include <iostream>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
 
 #define XPLUGIN_API __declspec(dllexport)
 #define strdup _strdup
@@ -87,7 +90,7 @@ static bool EnsurePicBindings()
 /*                     Per-instance state & helpers                     */
 struct CanvasInst{
     int     gfxHandle   = 0;         // our double-buffer
-    int     backdropGfx = 0;         // optional background picture (graphics handle)
+    int     backdropPic  = 0;         // optional background picture (XPicture handle)
     HWND    hwnd        = nullptr;
     int     x=0,y=0,w=0,h=0,parent=0;
     bool    created     = false;
@@ -102,6 +105,10 @@ static std::uniform_int_distribution<int>              gDist(10000000,99999999);
 static std::mutex gEvMx;
 static std::unordered_map<int,std::unordered_map<std::string,void*>> gCallbacks;
 
+// Used to synthesize double-clicks on window classes that don't deliver WM_LBUTTONDBLCLK.
+struct ClickState { DWORD lastDown=0; int lastX=0; int lastY=0; };
+static std::unordered_map<int, ClickState> gClick;
+
 static void fire(int h,const std::string& ev,const char* param)
 {
     void* fp=nullptr;
@@ -112,8 +119,17 @@ static void fire(int h,const std::string& ev,const char* param)
         if(jt!=it->second.end()) fp=jt->second;
       }}
     if(!fp) return;
+
+    // Match XButton's callback contract: pass a stable, heap-backed UTF-8 string
+    // for the duration of the callback, then free it.
+    char* data = strdup(param ? param : "");
+#ifdef _WIN32
     using CB = void(__stdcall*)(const char*);
-    ((CB)fp)(param?param:"");
+#else
+    using CB = void(*)(const char*);
+#endif
+    ((CB)fp)(data);
+    free(data);
 }
 
 /* -------------------------------------------------------------------- */
@@ -123,7 +139,13 @@ static LRESULT CALLBACK CanvasProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
                                    UINT_PTR, DWORD_PTR ref)
 {
     int h=(int)ref;
-    CanvasInst* ci=gInst[h];
+    CanvasInst* ci=nullptr;
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it != gInst.end()) ci = it->second;
+    }
+    if (!ci) return DefSubclassProc(hwnd,msg,wp,lp);
     switch(msg){
     /* case WM_SIZE:{
         ci->w=LOWORD(lp); ci->h=HIWORD(lp);
@@ -167,8 +189,9 @@ static LRESULT CALLBACK CanvasProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
         PAINTSTRUCT ps; HDC dc=BeginPaint(hwnd,&ps);
 
         /* draw optional backdrop */
-        if(ci->backdropGfx)
-            pGfx_DrawPicture(ci->gfxHandle,ci->backdropGfx,0,0,ci->w,ci->h);
+        if(ci->backdropPic)
+            // Pass the XPicture handle; XGraphics_DrawPicture will resolve it to a bitmap-backed XGraphics.
+            pGfx_DrawPicture(ci->gfxHandle,ci->backdropPic,0,0,ci->w,ci->h);
 
         /* user Paint event */
         char buf[32]; sprintf(buf,"%d",ci->gfxHandle);
@@ -178,10 +201,65 @@ static LRESULT CALLBACK CanvasProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
         EndPaint(hwnd,&ps);
         return 0;
     }
-    case WM_LBUTTONDOWN: {char b[32]; sprintf(b,"%d,%d",GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); fire(h,"mousedown",b); break;}
-    case WM_LBUTTONUP:   {char b[32]; sprintf(b,"%d,%d",GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); fire(h,"mouseup",b);   break;}
-    case WM_MOUSEMOVE:   {char b[32]; sprintf(b,"%d,%d",GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); fire(h,"mousemove",b); break;}
-    case WM_LBUTTONDBLCLK:{char b[32];sprintf(b,"%d,%d",GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); fire(h,"doubleclick",b);break;}
+    case WM_LBUTTONDOWN: {
+        int mx = GET_X_LPARAM(lp);
+        int my = GET_Y_LPARAM(lp);
+
+        char b[64];
+        std::snprintf(b, sizeof(b), "%d,%d", mx, my);
+        fire(h, "mousedown", b);
+
+        // Capture so the script reliably receives MouseUp even if the user drags outside the control.
+        SetCapture(hwnd);
+
+        // Synthesize DoubleClick if the underlying window class doesn't deliver WM_LBUTTONDBLCLK.
+        DWORD now = GetTickCount();
+        ClickState &cs = gClick[h];
+        UINT dblTime = GetDoubleClickTime();
+        int maxDx = GetSystemMetrics(SM_CXDOUBLECLK);
+        int maxDy = GetSystemMetrics(SM_CYDOUBLECLK);
+
+        if (cs.lastDown != 0 &&
+            (now - cs.lastDown) <= dblTime &&
+            std::abs(mx - cs.lastX) <= maxDx &&
+            std::abs(my - cs.lastY) <= maxDy)
+        {
+            fire(h, "doubleclick", b);
+            cs.lastDown = 0;
+        }
+        else
+        {
+            cs.lastDown = now;
+            cs.lastX = mx;
+            cs.lastY = my;
+        }
+        break;
+    }
+    case WM_LBUTTONUP: {
+        int mx = GET_X_LPARAM(lp);
+        int my = GET_Y_LPARAM(lp);
+
+        char b[64];
+        std::snprintf(b, sizeof(b), "%d,%d", mx, my);
+        fire(h, "mouseup", b);
+
+        if (GetCapture() == hwnd) ReleaseCapture();
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%d,%d", GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        fire(h, "mousemove", b);
+        break;
+    }
+    case WM_LBUTTONDBLCLK: {
+        // If the class supports true WM_LBUTTONDBLCLK, fire the event and reset our synthesizer.
+        char b[64];
+        std::snprintf(b, sizeof(b), "%d,%d", GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        fire(h, "doubleclick", b);
+        gClick[h].lastDown = 0;
+        break;
+    }
     }
     return DefSubclassProc(hwnd,msg,wp,lp);
 }
@@ -202,44 +280,247 @@ XPLUGIN_API void XCanvas_Close(int h)
 {
     std::lock_guard<std::mutex> lk(gMx);
     auto it=gInst.find(h); if(it==gInst.end())return;
-    if(it->second->gfxHandle) pGfx_Close(it->second->gfxHandle);
+    if(pGfx_Close && it->second->gfxHandle) pGfx_Close(it->second->gfxHandle);
     delete it->second; gInst.erase(it);
 }
 
-/* ---- simple properties (Left/Top/Width/Height) ---- */
-#define PROP(NAME,member)                                              \
-XPLUGIN_API int  XCanvas_##NAME##_GET(int h){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);return it!=gInst.end()?it->second->member:0;} \
-XPLUGIN_API void XCanvas_##NAME##_SET(int h,int v){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);if(it==gInst.end())return;it->second->member=v; if(it->second->created) MoveWindow(it->second->hwnd,it->second->x,it->second->y,it->second->w,it->second->h,TRUE);}
-PROP(X,x) PROP(Y,y) PROP(Width,w) PROP(Height,h)
+/* ---- simple properties (Left/Top/Width/Height) ----
+   IMPORTANT: never hold gMx while calling Win32 APIs like MoveWindow/DestroyWindow/CreateWindowEx,
+   because those APIs can synchronously send messages (WM_SIZE/WM_PAINT/etc) back into CanvasProc,
+   which also locks gMx → deadlock.
+*/
 
-/* ---- Parent (creates the real HWND) -------------------------------- */
-XPLUGIN_API void XCanvas_Parent_SET(int h,int parent)
+XPLUGIN_API int XCanvas_X_GET(int h)
 {
     std::lock_guard<std::mutex> lk(gMx);
-    auto ci=gInst[h];
-    if(ci->created){ DestroyWindow(ci->hwnd); ci->created=false; pGfx_Close(ci->gfxHandle); ci->gfxHandle=0; }
-    ci->parent = parent;
+    auto it = gInst.find(h);
+    return (it != gInst.end()) ? it->second->x : 0;
+}
 
-    using Fn=HWND(*)(int); static Fn getHWND=nullptr;
-    if(!getHWND){ HMODULE m=GetModuleHandleA("XWindow.dll"); if(m) getHWND=(Fn)GetProcAddress(m,"XWindow_GetHWND"); }
-    HWND phwnd = getHWND?getHWND(parent):nullptr; if(!phwnd) return;
+XPLUGIN_API void XCanvas_X_SET(int h, int v)
+{
+    HWND hwnd = nullptr;
+    bool created = false;
+    int x = 0, y = 0, w = 0, hh = 0;
 
-    ci->hwnd = CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE,
-                               ci->x,ci->y,ci->w,ci->h,phwnd,nullptr,GetModuleHandleW(nullptr),nullptr);
-    if(!ci->hwnd) return;
-    ci->created=true;
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) return;
+        CanvasInst* ci = it->second;
+        ci->x = v;
+
+        created = ci->created;
+        hwnd = ci->hwnd;
+        x = ci->x; y = ci->y; w = ci->w; hh = ci->h;
+    }
+
+    if (created && hwnd) {
+        MoveWindow(hwnd, x, y, w, hh, TRUE);
+    }
+}
+
+XPLUGIN_API int XCanvas_Y_GET(int h)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it = gInst.find(h);
+    return (it != gInst.end()) ? it->second->y : 0;
+}
+
+XPLUGIN_API void XCanvas_Y_SET(int h, int v)
+{
+    HWND hwnd = nullptr;
+    bool created = false;
+    int x = 0, y = 0, w = 0, hh = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) return;
+        CanvasInst* ci = it->second;
+        ci->y = v;
+
+        created = ci->created;
+        hwnd = ci->hwnd;
+        x = ci->x; y = ci->y; w = ci->w; hh = ci->h;
+    }
+
+    if (created && hwnd) {
+        MoveWindow(hwnd, x, y, w, hh, TRUE);
+    }
+}
+
+XPLUGIN_API int XCanvas_Width_GET(int h)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it = gInst.find(h);
+    return (it != gInst.end()) ? it->second->w : 0;
+}
+
+XPLUGIN_API void XCanvas_Width_SET(int h, int v)
+{
+    HWND hwnd = nullptr;
+    bool created = false;
+    int x = 0, y = 0, w = 0, hh = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) return;
+        CanvasInst* ci = it->second;
+        ci->w = v;
+
+        created = ci->created;
+        hwnd = ci->hwnd;
+        x = ci->x; y = ci->y; w = ci->w; hh = ci->h;
+    }
+
+    if (created && hwnd) {
+        MoveWindow(hwnd, x, y, w, hh, TRUE);
+    }
+}
+
+XPLUGIN_API int XCanvas_Height_GET(int h)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it = gInst.find(h);
+    return (it != gInst.end()) ? it->second->h : 0;
+}
+
+XPLUGIN_API void XCanvas_Height_SET(int h, int v)
+{
+    HWND hwnd = nullptr;
+    bool created = false;
+    int x = 0, y = 0, w = 0, hh = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) return;
+        CanvasInst* ci = it->second;
+        ci->h = v;
+
+        created = ci->created;
+        hwnd = ci->hwnd;
+        x = ci->x; y = ci->y; w = ci->w; hh = ci->h;
+    }
+
+    if (created && hwnd) {
+        MoveWindow(hwnd, x, y, w, hh, TRUE);
+    }
+}
+
+/* ---- Parent (creates the real HWND) -------------------------------- */
+XPLUGIN_API void XCanvas_Parent_SET(int h, int parent)
+{
+    // Grab instance and detach any existing HWND/back-buffer under the lock
+    CanvasInst* ci = nullptr;
+    HWND oldHwnd = nullptr;
+    int oldGfx = 0;
+
+    int x = 0, y = 0, w = 0, hh = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) return;
+        ci = it->second;
+
+        if (ci->created) {
+            oldHwnd = ci->hwnd;
+            oldGfx  = ci->gfxHandle;
+
+            ci->created = false;
+            ci->hwnd = nullptr;
+            ci->gfxHandle = 0;
+        }
+
+        ci->parent = parent;
+
+        x = ci->x;
+        y = ci->y;
+        w = ci->w;
+        hh = ci->h;
+    }
+
+    // Tear down old resources OUTSIDE the lock (avoids message re-entrancy deadlocks)
+    if (oldHwnd) {
+        DestroyWindow(oldHwnd);
+    }
+    if (oldGfx && pGfx_Close) {
+        pGfx_Close(oldGfx);
+    }
+
+    // Resolve the parent HWND from XWindow
+    using Fn = HWND(*)(int);
+    static Fn getHWND = nullptr;
+    if (!getHWND) {
+        HMODULE m = GetModuleHandleA("XWindow.dll");
+        if (m) getHWND = (Fn)GetProcAddress(m, "XWindow_GetHWND");
+    }
+
+    HWND phwnd = getHWND ? getHWND(parent) : nullptr;
+    if (!phwnd) return;
+
+    // Create the control window OUTSIDE the lock (CreateWindowEx can synchronously send messages)
+    HWND hwnd = CreateWindowExW(
+        0,
+        L"STATIC",
+        L"",
+        WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+        x, y, w, hh,
+        phwnd,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        nullptr
+    );
+    if (!hwnd) return;
 
     EnsureGfxBindings();
-    ci->gfxHandle = pGfx_ConstructorPicture(ci->w?ci->w:1,ci->h?ci->h:1,32);
+    int gfxHandle = pGfx_ConstructorPicture(w ? w : 1, hh ? hh : 1, 32);
 
-    SetWindowSubclass(ci->hwnd,CanvasProc,0,(DWORD_PTR)h);
+    // Publish state under lock
+    {
+        std::lock_guard<std::mutex> lk(gMx);
+        auto it = gInst.find(h);
+        if (it == gInst.end()) {
+            // Extremely unlikely; clean up to avoid leaks
+            if (gfxHandle && pGfx_Close) pGfx_Close(gfxHandle);
+            DestroyWindow(hwnd);
+            return;
+        }
+        it->second->hwnd = hwnd;
+        it->second->created = true;
+        it->second->gfxHandle = gfxHandle;
+    }
+
+    // Install subclass after state is valid
+    SetWindowSubclass(hwnd, CanvasProc, 0, (DWORD_PTR)h);
 }
-XPLUGIN_API int  XCanvas_Parent_GET(int h){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);return it!=gInst.end()?it->second->parent:0;}
+
+XPLUGIN_API int XCanvas_Parent_GET(int h)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it = gInst.find(h);
+    return it != gInst.end() ? it->second->parent : 0;
+}
 
 /* ---- exposed handles ----------------------------------------------- */
 XPLUGIN_API int  XCanvas_Graphics_GET (int h){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);return it!=gInst.end()?it->second->gfxHandle:0;}
-XPLUGIN_API void XCanvas_Backdrop_SET(int h,int picH){ if(!EnsurePicBindings())return; std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h); if(it==gInst.end())return; it->second->backdropGfx = pPic_Graphics_GET(picH); if(it->second->created) InvalidateRect(it->second->hwnd,nullptr,TRUE);}
-XPLUGIN_API int  XCanvas_Backdrop_GET(int h){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);return it!=gInst.end()?it->second->backdropGfx:0;}
+XPLUGIN_API void XCanvas_Backdrop_SET(int h,int picH)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it=gInst.find(h);
+    if(it==gInst.end()) return;
+    it->second->backdropPic = picH;
+    if(it->second->created) InvalidateRect(it->second->hwnd,nullptr,TRUE);
+}
+XPLUGIN_API int  XCanvas_Backdrop_GET(int h)
+{
+    std::lock_guard<std::mutex> lk(gMx);
+    auto it=gInst.find(h);
+    return it!=gInst.end()?it->second->backdropPic:0;
+}
 
 /* ---- misc ----------------------------------------------------------- */
 XPLUGIN_API void XCanvas_Refresh   (int h){std::lock_guard<std::mutex>lk(gMx);auto it=gInst.find(h);if(it!=gInst.end()&&it->second->created)InvalidateRect(it->second->hwnd,nullptr,TRUE);}
@@ -290,12 +571,11 @@ static ClassProperty kProps[]={
     {"Parent","integer",(void*)XCanvas_Parent_GET,(void*)XCanvas_Parent_SET},
     {"Graphics","XGraphics",(void*)XCanvas_Graphics_GET,nullptr},
     {"Backdrop","XPicture",(void*)XCanvas_Backdrop_GET,(void*)XCanvas_Backdrop_SET},
-        /* ── event-token properties (restore these!) ───────────────────── */
-        {"Paint",       "string",  (void*)XCanvas_Paint_GET,       nullptr},
-        {"MouseDown",   "string",  (void*)XCanvas_MouseDown_GET,   nullptr},
-        {"MouseUp",     "string",  (void*)XCanvas_MouseUp_GET,     nullptr},
-        {"MouseMove",   "string",  (void*)XCanvas_MouseMove_GET,   nullptr},
-        {"DoubleClick", "string",  (void*)XCanvas_DoubleClick_GET, nullptr}
+    {"Paint","string",(void*)XCanvas_Paint_GET,nullptr},
+    {"MouseDown","string",(void*)XCanvas_MouseDown_GET,nullptr},
+    {"MouseUp","string",(void*)XCanvas_MouseUp_GET,nullptr},
+    {"MouseMove","string",(void*)XCanvas_MouseMove_GET,nullptr},
+    {"DoubleClick","string",(void*)XCanvas_DoubleClick_GET,nullptr}
 };
 static ClassEntry kMethods[]={
     {"Refresh",   (void*)XCanvas_Refresh,    1,{"integer"},"void"},
@@ -324,8 +604,10 @@ XPLUGIN_API ClassDefinition* GetClassDefinition(){ return &gDef; }
 /* ---- DLL unload ---- */
 static void CleanupAll(){
     std::lock_guard<std::mutex> lk(gMx);
-    for(auto&kv:gInst){ if(kv.second->gfxHandle) pGfx_Close(kv.second->gfxHandle); delete kv.second; }
-    gInst.clear(); if(gGfxLib) FreeLibrary(gGfxLib); if(gPicLib) FreeLibrary(gPicLib);
+    for(auto&kv:gInst){ if(pGfx_Close && kv.second->gfxHandle) pGfx_Close(kv.second->gfxHandle); delete kv.second; }
+    gInst.clear();
+    { std::lock_guard<std::mutex> lk2(gEvMx); gCallbacks.clear(); gClick.clear(); }
+    if(gGfxLib) FreeLibrary(gGfxLib); if(gPicLib) FreeLibrary(gPicLib);
 }
 BOOL APIENTRY DllMain(HMODULE, DWORD r, LPVOID){ if(r==DLL_PROCESS_DETACH) CleanupAll(); return TRUE; }
 

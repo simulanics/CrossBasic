@@ -1,2 +1,2 @@
 g++ -s -shared -fPIC -m64 -O3 -o SQLiteDatabase.dll SQLiteDatabase.cpp -lsqlite3
-cp SQLiteDatabase.dll ../SQLiteStatement/SQLiteDatabase.dll
+g++ -shared -o SQLiteStatement.dll SQLiteStatement.cpp -lsqlite3 -Wl,--unresolved-symbols=ignore-all -L. -lSQLiteDatabase

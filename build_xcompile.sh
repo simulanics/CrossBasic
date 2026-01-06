@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-SRC="XCompile/xcompile.cpp"
+SRC="XCompile-SRC/xcompile.cpp"
 DEFAULT_OUT="xcompile"
 RELEASE_DIR="release-64"
 ERROR_LOG="error.log"

@@ -143,7 +143,31 @@ XPLUGIN_API void BindVertexArray(int, unsigned int id) { glBindVertexArray(id); 
 XPLUGIN_API unsigned int CreateBuffer(int) { unsigned int id; glGenBuffers(1,&id); return id; }
 XPLUGIN_API void BindBuffer(int, unsigned int t, unsigned int id) { glBindBuffer(t,id); }
 // BufferData: target, data pointer, size in bytes, usage
-XPLUGIN_API void BufferData(int, unsigned int t, const void* d, int sz, unsigned int u) { glBufferData(t, sz, d, u); }
+XPLUGIN_API void BufferData(int handle, unsigned int target, const void* data, int sizeBytes, unsigned int usage) {
+    // Raw pointer/bytes version (advanced use).
+    if (!gInstances.count(handle)) return;
+    glBufferData(target, sizeBytes, data, usage);
+}
+
+XPLUGIN_API void BufferDataF(int handle, unsigned int target, const double* values, int count, unsigned int usage) {
+    // Accepts CrossBasic numeric arrays via VM type 'array' (marshalled as double*).
+    if (!gInstances.count(handle)) return;
+    if (!values || count <= 0) return;
+    std::vector<float> tmp;
+    tmp.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) tmp.push_back(static_cast<float>(values[i]));
+    glBufferData(target, static_cast<GLsizeiptr>(tmp.size() * sizeof(float)), tmp.data(), usage);
+}
+
+XPLUGIN_API void BufferDataUI(int handle, unsigned int target, const double* values, int count, unsigned int usage) {
+    // Accepts CrossBasic numeric arrays via VM type 'array' (marshalled as double*).
+    if (!gInstances.count(handle)) return;
+    if (!values || count <= 0) return;
+    std::vector<unsigned int> tmp;
+    tmp.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) tmp.push_back(static_cast<unsigned int>(values[i]));
+    glBufferData(target, static_cast<GLsizeiptr>(tmp.size() * sizeof(unsigned int)), tmp.data(), usage);
+}
 // Attributes
 XPLUGIN_API void VertexAttribPointer(int, unsigned int idx,int sz,unsigned int t,bool n,int st,int off) {
     glVertexAttribPointer(idx,sz,t,n,st,reinterpret_cast<void*>(static_cast<intptr_t>(off)));
@@ -151,14 +175,32 @@ XPLUGIN_API void VertexAttribPointer(int, unsigned int idx,int sz,unsigned int t
 XPLUGIN_API void EnableVertexAttrib(int, unsigned int idx) { glEnableVertexAttribArray(idx); }
 // Uniform setters
 XPLUGIN_API void UniformMatrix4fv(int, int loc,int cnt,bool n,const float* v) { glUniformMatrix4fv(loc,cnt,n,v); }
-XPLUGIN_API void Uniform3f(int, int loc,float x,float y,float z) { glUniform3f(loc,x,y,z); }
+XPLUGIN_API void Uniform3f(int, int loc,double x,double y,double z) { glUniform3f(loc,(float)x,(float)y,(float)z); }
 // Draw
 XPLUGIN_API void DrawElements(int, unsigned int m,int cnt,unsigned int t,int off) { glDrawElements(m,cnt,t,reinterpret_cast<void*>(static_cast<intptr_t>(off))); }
 // Swap and poll
-XPLUGIN_API void SwapGLBuffers(int h) { auto* inst = gInstances[h]; glfwSwapBuffers(inst->window); }
+XPLUGIN_API void SwapGLBuffers(int h) {
+    XOpenGLSurface* inst = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        auto it = gInstances.find(h);
+        if (it == gInstances.end()) return;
+        inst = it->second;
+    }
+    glfwSwapBuffers(inst->window);
+}
 XPLUGIN_API void PollEvents(int) { glfwPollEvents(); }
 // Should close
-XPLUGIN_API bool ShouldClose(int h) { return glfwWindowShouldClose(gInstances[h]->window); }
+XPLUGIN_API bool ShouldClose(int h) {
+    XOpenGLSurface* inst = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        auto it = gInstances.find(h);
+        if (it == gInstances.end()) return true;
+        inst = it->second;
+    }
+    return glfwWindowShouldClose(inst->window);
+}
 // Time
 XPLUGIN_API double GetTime(int) { return glfwGetTime(); }
 
@@ -169,9 +211,9 @@ XPLUGIN_API float* IdentityMatrix4(int) {
     std::memcpy(buffer, glm::value_ptr(m), sizeof(buffer)); return buffer;
 }
 // Rotate matrix
-XPLUGIN_API float* RotateMatrix4(int, const double* inMat, double angle, double x, double y, double z) {
+XPLUGIN_API float* RotateMatrix4(int, const float* inMat, double angle, double x, double y, double z) {
     static float buffer[16]; glm::mat4 m;
-    for (int i = 0; i < 16; ++i) m[i/4][i%4] = static_cast<float>(inMat[i]);
+    for (int i = 0; i < 16; ++i) m[i/4][i%4] = inMat[i];
     glm::mat4 r = glm::rotate(m, static_cast<float>(angle), glm::vec3(static_cast<float>(x),static_cast<float>(y),static_cast<float>(z)));
     std::memcpy(buffer, glm::value_ptr(r), sizeof(buffer)); return buffer;
 }
@@ -214,7 +256,9 @@ static ClassEntry methods[] = {
     {"CreateBuffer",       (void*)CreateBuffer,       1,{"integer"},                                      "integer"},
     {"BindBuffer",         (void*)BindBuffer,         3,{"integer","integer","integer"},                "void"},
     {"BufferData",         (void*)BufferData,         5,{"integer","integer","pointer","integer","integer"},"void"},
-    {"VertexAttribPointer",(void*)VertexAttribPointer,7,{"integer","integer","integer","boolean","integer","integer","integer"},"void"},
+    {"BufferDataF",        (void*)BufferDataF,        5,{"integer","integer","array","integer","integer"},"void"},
+    {"BufferDataUI",       (void*)BufferDataUI,       5,{"integer","integer","array","integer","integer"},"void"},
+    {"VertexAttribPointer",(void*)VertexAttribPointer,7,{"integer","integer","integer","integer","boolean","integer","integer"},"void"},
     {"EnableVertexAttrib", (void*)EnableVertexAttrib, 2,{"integer","integer"},                            "void"},
     {"UniformMatrix4fv",   (void*)UniformMatrix4fv,   5,{"integer","integer","integer","boolean","pointer"},"void"},
     {"Uniform3f",          (void*)Uniform3f,          5,{"integer","integer","double","double","double"},"void"},

@@ -1,5 +1,5 @@
 Dim pic As New XPicture(320,240,32)
-pic.Load("C:\Users\mcomb\Desktop\img.png")
+pic.Load("./Scripts/ico.png")
 
 Var win As New XWindow
 win.Width  = 680

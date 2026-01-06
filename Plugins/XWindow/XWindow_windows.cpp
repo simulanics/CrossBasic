@@ -141,68 +141,7 @@ public:
     }
 #endif
 
-    // ---------------------------------------------------------------------
-    // Cross-platform geometry getters used by property accessors.
-    // These return the outer window rectangle position/size (screen coords).
-    // ---------------------------------------------------------------------
-    int getLeft() const {
-#if defined(_WIN32)
-        RECT r{};
-        if (hwnd && ::GetWindowRect(hwnd, &r)) return (int)r.left;
-        return 0;
-#elif defined(__linux__)
-        return x11X;
-#elif defined(__APPLE__)
-        return cocoaX;
-#else
-        return 0;
-#endif
-    }
-
-    int getTop() const {
-#if defined(_WIN32)
-        RECT r{};
-        if (hwnd && ::GetWindowRect(hwnd, &r)) return (int)r.top;
-        return 0;
-#elif defined(__linux__)
-        return x11Y;
-#elif defined(__APPLE__)
-        return cocoaY;
-#else
-        return 0;
-#endif
-    }
-
-    int getWidth() const {
-#if defined(_WIN32)
-        RECT r{};
-        if (hwnd && ::GetWindowRect(hwnd, &r)) return (int)(r.right - r.left);
-        return 0;
-#elif defined(__linux__)
-        return x11W;
-#elif defined(__APPLE__)
-        return cocoaW;
-#else
-        return 0;
-#endif
-    }
-
-    int getHeight() const {
-#if defined(_WIN32)
-        RECT r{};
-        if (hwnd && ::GetWindowRect(hwnd, &r)) return (int)(r.bottom - r.top);
-        return 0;
-#elif defined(__linux__)
-        return x11H;
-#elif defined(__APPLE__)
-        return cocoaH;
-#else
-        return 0;
-#endif
-    }
-
 #if defined(__linux__)
-
   // X11 backend (Linux/BSD with X11).
   Display* x11Display = nullptr;
   ::Window x11Window = 0;
@@ -1476,7 +1415,7 @@ static ClassEntry methods[] =
     { "Hide",                     (void*)XWindow_Hide,             1, { "integer" },                    "void" },
     { "Close",                    (void*)Close,                    1, { "integer" },                    "void" },
     { "SetIcon",                  (void*)XWindow_SetIcon,          2, { "integer","string" },           "void" },
-    { "MessageBox",               (void*)XWindow_MessageBox,       4, { "integer","string","string","integer" },           "void" }
+    { "MessageBox",               (void*)XWindow_MessageBox,       2, { "integer","string" },           "void" }
 };
 
 // final class definition

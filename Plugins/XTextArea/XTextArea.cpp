@@ -18,6 +18,23 @@
     
 */
 
+
+// --- Platform UI headers ---
+#if defined(__linux__)
+  #include <dlfcn.h>
+  #include <gtk/gtk.h>
+#elif defined(__APPLE__)
+  #include <dlfcn.h>
+  #include <Cocoa/Cocoa.h>
+#endif
+
+#ifndef _WIN32
+  typedef uint32_t COLORREF;
+  static inline constexpr COLORREF RGB(int r,int g,int b) {
+    return (COLORREF)((r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16));
+  }
+#endif
+
 #ifdef _WIN32
   #define UNICODE
   #define _UNICODE
@@ -47,6 +64,154 @@
   #define WM_XTEXTAREA_SETVISIBLE    (WM_APP + 0x10A)
 #else
   #define XPLUGIN_API __attribute__((visibility("default")))
+
+// -----------------------------------------------------------------------------
+// Cross-platform implementation (non-Windows)
+// -----------------------------------------------------------------------------
+#if !defined(_WIN32)
+
+typedef void* (*XWindow_GetNativeHandle_Proc)(int);
+static XWindow_GetNativeHandle_Proc gGetParentNativeHandle = nullptr;
+
+static void* resolveParentNativeHandle(int windowId) {
+  if (gGetParentNativeHandle) return gGetParentNativeHandle(windowId);
+#if defined(__APPLE__)
+  const char* candidates[] = {"libXWindow.dylib","XWindow.dylib","XWindow.bundle","XWindow"};
+#else
+  const char* candidates[] = {"libXWindow.so","XWindow.so","XWindow"};
+#endif
+  void* lib = nullptr;
+  for (auto* name : candidates) { lib = dlopen(name, RTLD_LAZY); if (lib) break; }
+  if (!lib) lib = dlopen(nullptr, RTLD_LAZY);
+  if (lib) gGetParentNativeHandle = (XWindow_GetNativeHandle_Proc)dlsym(lib, "XWindow_GetNativeHandle");
+  if (!gGetParentNativeHandle) return nullptr;
+  return gGetParentNativeHandle(windowId);
+}
+
+static void platformApplyGeom(const std::shared_ptr<XTextArea>& ta) {
+  if (!ta || !ta->created) return;
+#if defined(__linux__)
+  if (!ta->scroller) return;
+  if (ta->parentGtk && GTK_IS_FIXED(ta->parentGtk)) gtk_fixed_move(GTK_FIXED(ta->parentGtk), ta->scroller, ta->x, ta->y);
+  gtk_widget_set_size_request(ta->scroller, ta->width, ta->height);
+#elif defined(__APPLE__)
+  if (!ta->scroll || !ta->parentCocoa) return;
+  NSRect pb = [ta->parentCocoa bounds];
+  CGFloat y = pb.size.height - ta->y - ta->height;
+  [ta->scroll setFrame:NSMakeRect(ta->x, y, ta->width, ta->height)];
+#endif
+}
+
+static void platformSetVisible(const std::shared_ptr<XTextArea>& ta, bool vis) {
+  if (!ta || !ta->created) return;
+#if defined(__linux__)
+  if (!ta->scroller) return;
+  if (vis) gtk_widget_show(ta->scroller); else gtk_widget_hide(ta->scroller);
+#elif defined(__APPLE__)
+  if (!ta->scroll) return;
+  [ta->scroll setHidden:(!vis)];
+#endif
+}
+
+static void platformSetEnabled(const std::shared_ptr<XTextArea>& ta, bool en) {
+  if (!ta || !ta->created) return;
+#if defined(__linux__)
+  if (!ta->scroller) return;
+  gtk_widget_set_sensitive(ta->scroller, en ? TRUE : FALSE);
+#elif defined(__APPLE__)
+  if (!ta->textView) return;
+  [ta->textView setEditable:(en ? YES : NO)];
+#endif
+}
+
+static void platformSetText(const std::shared_ptr<XTextArea>& ta, const char* txt) {
+  if (!ta || !ta->created) return;
+  const char* s = txt ? txt : "";
+#if defined(__linux__)
+  if (!ta->textView) return;
+  GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(ta->textView));
+  gtk_text_buffer_set_text(buf, s, -1);
+#elif defined(__APPLE__)
+  if (!ta->textView) return;
+  NSString* ns = [NSString stringWithUTF8String:s];
+  [[ta->textView textStorage] setAttributedString:[[NSAttributedString alloc] initWithString:ns]];
+#endif
+}
+
+static void platformAppendText(const std::shared_ptr<XTextArea>& ta, const char* txt) {
+  if (!ta || !ta->created) return;
+  const char* s = txt ? txt : "";
+#if defined(__linux__)
+  if (!ta->textView) return;
+  GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(ta->textView));
+  GtkTextIter endIter;
+  gtk_text_buffer_get_end_iter(buf, &endIter);
+  gtk_text_buffer_insert(buf, &endIter, s, -1);
+#elif defined(__APPLE__)
+  if (!ta->textView) return;
+  NSString* ns = [NSString stringWithUTF8String:s];
+  [[ta->textView textStorage] appendAttributedString:[[NSAttributedString alloc] initWithString:ns]];
+#endif
+}
+
+static std::string platformGetText(const std::shared_ptr<XTextArea>& ta) {
+  if (!ta || !ta->created) return "";
+#if defined(__linux__)
+  if (!ta->textView) return "";
+  GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(ta->textView));
+  GtkTextIter startIter, endIter;
+  gtk_text_buffer_get_bounds(buf, &startIter, &endIter);
+  gchar* s = gtk_text_buffer_get_text(buf, &startIter, &endIter, TRUE);
+  std::string out = s ? std::string(s) : "";
+  if (s) g_free(s);
+  return out;
+#elif defined(__APPLE__)
+  if (!ta->textView) return "";
+  NSString* ns = [[ta->textView textStorage] string];
+  return ns ? std::string([ns UTF8String]) : "";
+#else
+  return "";
+#endif
+}
+
+static void dispatchEventJSON(int handle, const char* eventName) {
+  if (!eventName) return;
+  void* cb = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(gEventsMx);
+    auto hit = gEvents.find(handle);
+    if (hit != gEvents.end()) {
+      auto eit = hit->second.find(eventName);
+      if (eit != hit->second.end()) cb = eit->second;
+    }
+  }
+  if (!cb) return;
+  std::string payload = std::string("{\"event\":\"") + eventName + "\",\"handle\":" + std::to_string(handle) + "}";
+  using EventFn = void(*)(const char*);
+  ((EventFn)cb)(payload.c_str());
+}
+
+#if defined(__linux__)
+static void onGtkBufferChanged(GtkTextBuffer*, gpointer userData) {
+  int handle = (int)(intptr_t)userData;
+  dispatchEventJSON(handle, "TextChanged");
+}
+#endif
+
+#if defined(__APPLE__)
+@interface CBTextAreaObserver : NSObject<NSTextViewDelegate>
+@property(nonatomic,assign) int handle;
+@end
+@implementation CBTextAreaObserver
+- (void)textDidChange:(NSNotification*)note {
+  (void)note;
+  dispatchEventJSON(self.handle, "TextChanged");
+}
+@end
+#endif
+
+#endif // !defined(_WIN32)
+
 #endif
 
 #include <mutex>

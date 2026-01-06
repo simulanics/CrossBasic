@@ -37,11 +37,12 @@ webview.lockbottom = true
 webview.lockright = true
 webview.lockleft = true
 
+'' Show the IDE
+webview.LoadURL("http://localhost:8080")
+
 '' Show the window
 win.Show()
 
-'' Show the IDE
-webview.LoadURL("http://localhost:8080")
 
 '' Keep the app alive and process events
 While True

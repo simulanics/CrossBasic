@@ -53,6 +53,8 @@
 #include <mutex> 
 #include <queue>
 #include <thread>
+#include <cerrno>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -96,6 +98,7 @@ struct ObjInstance;
 struct ObjArray;
 struct ObjBoundMethod;
 struct ObjModule;
+struct ObjRef;
 
 // ============================================================================  
 // Color type  
@@ -147,6 +150,7 @@ struct Value : public std::variant<
     std::vector<std::shared_ptr<ObjFunction>>,
     std::shared_ptr<ObjModule>,
     std::shared_ptr<ObjEnum>,
+    std::shared_ptr<ObjRef>,
     void* // Pointer type
 > {
     using std::variant<
@@ -166,11 +170,22 @@ struct Value : public std::variant<
         std::vector<std::shared_ptr<ObjFunction>>,
         std::shared_ptr<ObjModule>,
         std::shared_ptr<ObjEnum>,
+        std::shared_ptr<ObjRef>,
         void*
     >::variant;
 };
 
 
+
+
+
+// ============================================================================  
+// ObjRef – internal reference wrapper used for ByRef parameters.
+// Holds a pointer to the ultimate Value cell in an Environment chain.
+// ============================================================================
+struct ObjRef {
+    Value* target = nullptr;
+};
 
 // Forward declaration for invokeScriptCallback:
 void invokeScriptCallback(const Value& funcVal, const char* param);
@@ -242,6 +257,7 @@ struct Param {
     bool optional;
     bool isAssigns = false;
     Value defaultValue;
+    bool byRef = false;
 };
 
 // ============================================================================  
@@ -327,6 +343,7 @@ std::string valueToString(const Value& val) {
         std::string operator()(const std::vector<std::shared_ptr<ObjFunction>>&) const { return "<overloaded functions>"; }
         std::string operator()(const std::shared_ptr<ObjModule>& mod) const { return "<module " + mod->name + ">"; }
         std::string operator()(const std::shared_ptr<ObjEnum>& e) const { return "<enum " + e->name + ">"; }
+        std::string operator()(const std::shared_ptr<ObjRef>&) const { return "<byref>"; }
         std::string operator()(void* ptr) const {
             if(ptr == nullptr) return "nil";
             char buf[20];
@@ -363,7 +380,8 @@ enum class XTokenType {
     MINUS_EQUAL,   // -=
     STAR_EQUAL,    // *=
     SLASH_EQUAL,   // /=
-    ASSIGNS
+    ASSIGNS,
+    BYREF
 };
 
 struct Token {
@@ -543,6 +561,7 @@ private:
         else if (lowerText == "goto")     type = XTokenType::GOTO;
         else if (lowerText == "enum")     type = XTokenType::ENUM;
         else if (lowerText == "assigns")  type = XTokenType::ASSIGNS;
+        else if (lowerText == "byref")   type = XTokenType::BYREF;
         addToken(type);
     }
 };
@@ -556,60 +575,139 @@ std::string rtrim(const std::string& s) {
     return s.substr(0, end + 1);
 }
 
-// ============================================================================  
-// Environment (case–insensitive for variable names)
 // ============================================================================
+// Environment (case–insensitive for variable names)
+// Notes:
+//  - ByRef parameters are implemented by storing an ObjRef in the callee's environment.
+//  - Environment::get() transparently dereferences ObjRef.
+//  - Environment::assign() writes through ObjRef.
+// ============================================================================
+[[noreturn]] void runtimeError(const std::string& msg);
+
 struct Environment {
     std::unordered_map<std::string, Value> values;
     std::shared_ptr<Environment> enclosing;
+
     Environment(std::shared_ptr<Environment> enclosing = nullptr)
         : enclosing(enclosing) { }
+
     void define(const std::string& name, const Value& value) {
         values[toLower(name)] = value;
     }
-    Value get(const std::string& name) {
+
+    // Non-fatal lookup used by the compiler and a few runtime helpers.
+    bool tryGetRaw(const std::string& name, Value& out) const {
         std::string key = toLower(name);
-        if (values.find(key) != values.end())
-            return values[key];
-        if (values.find("self") != values.end()) {
-            Value selfVal = values["self"];
+        auto it = values.find(key);
+        if (it != values.end()) {
+            out = it->second;
+            return true;
+        }
+        if (enclosing) return enclosing->tryGetRaw(name, out);
+        return false;
+    }
+
+    // Return a pointer to the ultimate storage cell for a variable name.
+    // If the variable is an ObjRef, this resolves and returns the referenced cell.
+    Value* getCell(const std::string& name) {
+        std::string key = toLower(name);
+
+        auto it = values.find(key);
+        if (it != values.end()) {
+            if (holds<std::shared_ptr<ObjRef>>(it->second)) {
+                auto r = getVal<std::shared_ptr<ObjRef>>(it->second);
+                if (!r || !r->target)
+                    runtimeError("ByRef: dangling reference for variable: " + name);
+                return r->target;
+            }
+            return &it->second;
+        }
+
+        // Support instance fields via implicit "self"
+        auto selfIt = values.find("self");
+        if (selfIt != values.end()) {
+            Value selfVal = selfIt->second;
             if (holds<std::shared_ptr<ObjInstance>>(selfVal)) {
                 auto instance = getVal<std::shared_ptr<ObjInstance>>(selfVal);
-                if (instance->fields.find(key) != instance->fields.end())
-                    return instance->fields[key];
+                auto fit = instance->fields.find(key);
+                if (fit != instance->fields.end())
+                    return &fit->second;
             }
         }
-        if (enclosing) return enclosing->get(name);
+
+        if (enclosing) return enclosing->getCell(name);
+
         std::cerr << "NilObjectException for variable: " << name << std::endl;
         exit(1);
-        return Value(std::monostate{});
+        return nullptr;
     }
+
+    // Standard get: transparently dereference ObjRef.
+    Value get(const std::string& name) {
+        Value* cell = getCell(name);
+        if (!cell) return Value(std::monostate{});
+        // If the cell itself happens to hold an ObjRef (nested), resolve once more.
+        if (holds<std::shared_ptr<ObjRef>>(*cell)) {
+            auto r = getVal<std::shared_ptr<ObjRef>>(*cell);
+            if (!r || !r->target)
+                runtimeError("ByRef: dangling nested reference for variable: " + name);
+            return *(r->target);
+        }
+        return *cell;
+    }
+
+    // Standard assign: write-through ObjRef when applicable.
     void assign(const std::string& name, const Value& value) {
         std::string key = toLower(name);
-        if (values.find(key) != values.end()) {
-            values[key] = value;
+
+        auto it = values.find(key);
+        if (it != values.end()) {
+            if (holds<std::shared_ptr<ObjRef>>(it->second)) {
+                auto r = getVal<std::shared_ptr<ObjRef>>(it->second);
+                if (!r || !r->target)
+                    runtimeError("ByRef: dangling reference assignment for variable: " + name);
+                *(r->target) = value;
+            } else {
+                it->second = value;
+            }
             return;
         }
-        if (values.find("self") != values.end()) {
-            Value selfVal = values["self"];
+
+        // Support instance fields via implicit "self"
+        auto selfIt = values.find("self");
+        if (selfIt != values.end()) {
+            Value selfVal = selfIt->second;
             if (holds<std::shared_ptr<ObjInstance>>(selfVal)) {
                 auto instance = getVal<std::shared_ptr<ObjInstance>>(selfVal);
-                if (instance->fields.find(key) != instance->fields.end()) {
-                    instance->fields[key] = value;
+                auto fit = instance->fields.find(key);
+                if (fit != instance->fields.end()) {
+                    if (holds<std::shared_ptr<ObjRef>>(fit->second)) {
+                        auto r = getVal<std::shared_ptr<ObjRef>>(fit->second);
+                        if (!r || !r->target)
+                            runtimeError("ByRef: dangling field reference assignment for variable: " + name);
+                        *(r->target) = value;
+                    } else {
+                        fit->second = value;
+                    }
                     return;
                 }
             }
         }
+
         if (enclosing) {
             enclosing->assign(name, value);
             return;
         }
+
         std::cerr << "NilObjectException for variable: " << name << std::endl;
         exit(1);
     }
 };
 
+
+
 // ============================================================================  
+// Runtime error helper
 // Runtime error helper
 // ============================================================================
 [[noreturn]] void runtimeError(const std::string& msg) {
@@ -679,6 +777,7 @@ enum OpCode {
     OP_POP,
     OP_DEFINE_GLOBAL,
     OP_GET_GLOBAL,
+    OP_GET_REF,
     OP_SET_GLOBAL,
     OP_NEW,
     OP_CALL,
@@ -722,6 +821,7 @@ std::string opcodeToString(int opcode) {
     case OP_POP:           return "OP_POP";
     case OP_DEFINE_GLOBAL: return "OP_DEFINE_GLOBAL";
     case OP_GET_GLOBAL:    return "OP_GET_GLOBAL";
+    case OP_GET_REF:       return "OP_GET_REF";
     case OP_SET_GLOBAL:    return "OP_SET_GLOBAL";
     case OP_NEW:           return "OP_NEW";
     case OP_CALL:          return "OP_CALL";
@@ -1046,6 +1146,7 @@ std::string getTypeName(const Value& v) {
         std::string operator()(const std::vector<std::shared_ptr<ObjFunction>>&) const { return "OverloadedFunctions"; }
         std::string operator()(const std::shared_ptr<ObjModule>&) const { return "ObjModule"; }
         std::string operator()(const std::shared_ptr<ObjEnum>&) const { return "ObjEnum"; }
+        std::string operator()(const std::shared_ptr<ObjRef>&) const { return "ObjRef"; }
         std::string operator()(void* ptr) const { return "pointer"; }
     } visitor;
     return std::visit(visitor, v);
@@ -1097,23 +1198,135 @@ static Value wrapHandleIfPluginClass(const std::string &raw,
 // ----------------------------------------------------------------------------
 // Handler for Plugin Script Callbacks (aka Event Handlers)
 // ----------------------------------------------------------------------------
-void invokeScriptCallback(const Value& funcVal, const char* param) {
+static inline std::string _cbTrimWS(const std::string& s)
+{
+    const char* ws = " \t\r\n";
+    size_t b = s.find_first_not_of(ws);
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(ws);
+    return s.substr(b, e - b + 1);
+}
+
+static std::vector<std::string> _cbSplitArgs(const std::string& p, size_t expectedCount)
+{
+    std::vector<std::string> out;
+
+    // If the callback target expects 0-1 parameter(s), preserve legacy behavior:
+    // pass the raw string through unmodified (even if it contains commas).
+    if (expectedCount <= 1) {
+        out.push_back(p);
+        return out;
+    }
+
+    // Only split when commas are present (our plugin event convention).
+    if (p.find(',') == std::string::npos) {
+        out.push_back(p);
+        return out;
+    }
+
+    size_t start = 0;
+    while (start <= p.size()) {
+        size_t comma = p.find(',', start);
+        if (comma == std::string::npos) comma = p.size();
+        out.push_back(_cbTrimWS(p.substr(start, comma - start)));
+        start = comma + 1;
+        if (comma == p.size()) break;
+    }
+    return out;
+}
+
+static bool _cbTryParseInt(const std::string& s, int& out)
+{
+    std::string t = _cbTrimWS(s);
+    if (t.empty()) return false;
+
+    char* end = nullptr;
+    errno = 0;
+    long v = std::strtol(t.c_str(), &end, 10);
+    if (errno != 0 || end == t.c_str() || *end != '\0') return false;
+    if (v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max()) return false;
+    out = static_cast<int>(v);
+    return true;
+}
+
+static bool _cbTryParseDouble(const std::string& s, double& out)
+{
+    std::string t = _cbTrimWS(s);
+    if (t.empty()) return false;
+
+    char* end = nullptr;
+    errno = 0;
+    double v = std::strtod(t.c_str(), &end);
+    if (errno != 0 || end == t.c_str() || *end != '\0') return false;
+    out = v;
+    return true;
+}
+
+static bool _cbTryParseBool(const std::string& s, bool& out)
+{
+    std::string t = toLower(_cbTrimWS(s));
+    if (t == "true" || t == "1")  { out = true;  return true; }
+    if (t == "false" || t == "0") { out = false; return true; }
+    return false;
+}
+
+static Value _cbCoerceToken(const std::string& raw, const Param& pd, VM& vm)
+{
+    std::string token = _cbTrimWS(raw);
+    std::string t = toLower(pd.type);
+
+    // No type specified → keep as string (legacy behavior)
+    if (pd.type.empty() || t == "variant")
+        return Value(token);
+
+    // Primitive coercions for common event patterns
+    if (t == "string" || t == "text")
+        return Value(token);
+
+    if (t == "integer" || t == "int") {
+        int iv;
+        if (_cbTryParseInt(token, iv)) return Value(iv);
+        return Value(token);
+    }
+
+    if (t == "double" || t == "number" || t == "float") {
+        double dv;
+        if (_cbTryParseDouble(token, dv)) return Value(dv);
+        int iv;
+        if (_cbTryParseInt(token, iv)) return Value(static_cast<double>(iv));
+        return Value(token);
+    }
+
+    if (t == "boolean" || t == "bool") {
+        bool bv;
+        if (_cbTryParseBool(token, bv)) return Value(bv);
+        return Value(token);
+    }
+
+    // Otherwise, attempt to wrap numeric handles into plugin class instances.
+    // If it doesn't match a plugin class, wrapHandleIfPluginClass will fall back.
+    return wrapHandleIfPluginClass(token, pd.type, vm);
+}
+
+void invokeScriptCallback(const Value& funcVal, const char* param)
+{
     // 1) Prevent concurrent VM mutations
     std::lock_guard<std::recursive_mutex> lock(vmMutex);
 
     // 2) Remember where our stack was so we can pop back to it
     size_t oldDepth = globalVM->stack.size();
 
-    // 3) Log entry and build our single-string argument list
+    // 3) Log entry
     std::string p = param ? param : "";
     debugLog("invokeScriptCallback: Called with param: " + (p.empty() ? "null" : p));
-    std::vector<Value> args{ Value(p) };
 
     // 4) Dispatch either a host function or a script function
     if (holds<BuiltinFn>(funcVal)) {
         debugLog("invokeScriptCallback: Detected BuiltinFn.");
         BuiltinFn hostFn = getVal<BuiltinFn>(funcVal);
-        hostFn(args);
+
+        // Preserve legacy behavior for BuiltinFn callbacks: a single string param.
+        hostFn({ Value(p) });
         debugLog("invokeScriptCallback: BuiltinFn executed.");
     }
     else if (holds<std::shared_ptr<ObjFunction>>(funcVal)) {
@@ -1124,36 +1337,37 @@ void invokeScriptCallback(const Value& funcVal, const char* param) {
         auto previousEnv = globalVM->environment;
         globalVM->environment = std::make_shared<Environment>(globalVM->globals);
 
-        // 6) Define parameters (or default values)
+        // 6) If the handler expects multiple args, split "x,y" into tokens.
+        //    If it expects one arg, pass the raw string through unmodified.
+        std::vector<std::string> rawArgs = _cbSplitArgs(p, fnObj->params.size());
+
+        // 7) Define parameters (or default values)
         for (size_t i = 0; i < fnObj->params.size(); ++i) {
             const auto& pd = fnObj->params[i];
-        
+
             Value actual;
-            if (i < args.size()) {
-                if (holds<std::string>(args[i]))
-                    actual = wrapHandleIfPluginClass(getVal<std::string>(args[i]),
-                                                     pd.type, *globalVM);
-                else
-                    actual = args[i];
+            if (i < rawArgs.size()) {
+                // Coerce token according to declared parameter type.
+                actual = _cbCoerceToken(rawArgs[i], pd, *globalVM);
             } else {
                 actual = pd.defaultValue;
             }
+
             globalVM->environment->define(pd.name, actual);
         }
-        
 
-        // 7) Execute the function body
+        // 8) Execute the function body
         Value result = runVM(*globalVM, fnObj->chunk);
         debugLog("invokeScriptCallback: Function executed with result: " + valueToString(result));
 
-        // 8) Restore the old environment
+        // 9) Restore the old environment
         globalVM->environment = previousEnv;
     }
     else {
         runtimeError("invokeScriptCallback: Not a callable function.");
     }
 
-    // 9) Pop any values the callback may have left on the stack
+    // 10) Pop any values the callback may have left on the stack
     globalVM->stack.resize(oldDepth);
 }
 
@@ -1772,6 +1986,37 @@ private:
             std::shared_ptr<Expr> valueExpr = expression();
             return std::make_shared<PropertyAssignmentStmt>(std::make_shared<VariableExpr>(obj.lexeme), prop.lexeme, valueExpr);
         }
+
+        // -----------------------------------------------------------------
+        // Assigns-style / array-element set statement
+        //
+        // BASIC uses '=' for equality in expressions, so we must NOT rewrite
+        // comparisons like:   If data(i) = key Then
+        //
+        // But at the statement level, we DO want to support the Xojo-style
+        // "Assigns" / array-set syntax:
+        //   data(i) = value        → data(i, value)
+        //   obj.Method(i) = value  → obj.Method(i, value)
+        //
+        // This block recognizes that pattern only when it appears as a
+        // standalone statement.
+        // -----------------------------------------------------------------
+        if (check(XTokenType::IDENTIFIER)) {
+            int saved = current;
+            std::shared_ptr<Expr> lhs = call();
+            if (auto callExpr = std::dynamic_pointer_cast<CallExpr>(lhs)) {
+                if (match({ XTokenType::EQUAL })) {
+                    std::shared_ptr<Expr> rhs = expression();
+                    auto args = callExpr->arguments;
+                    args.push_back(rhs);
+                    return std::make_shared<ExpressionStmt>(
+                        std::make_shared<CallExpr>(callExpr->callee, args)
+                    );
+                }
+            }
+            // Not a call-assignment statement; rewind and continue normally.
+            current = saved;
+        }
         if (match({ XTokenType::FUNCTION, XTokenType::SUB }))
             return functionDeclaration(access);
         if (match({ XTokenType::CLASS }))
@@ -1829,15 +2074,17 @@ private:
         std::vector<Param> parameters;
         if (!check(XTokenType::RIGHT_PAREN)) {
             do {
+                bool isByRef   = false;
                 bool isOptional = false;
-                bool isAssigns = false;          // ← NEW
+                bool isAssigns  = false;
 
-                if (match({ XTokenType::ASSIGNS })) {  //Detect keyword
-                   isAssigns = true;
-                }
-
-                if (match({ XTokenType::XOPTIONAL })) { 
-                    isOptional = true; 
+                // Accept keywords in any order before the parameter name.
+                bool scanning = true;
+                while (scanning) {
+                    if (match({ XTokenType::BYREF }))      { isByRef = true; continue; }
+                    if (match({ XTokenType::ASSIGNS }))    { isAssigns = true; continue; }
+                    if (match({ XTokenType::XOPTIONAL }))  { isOptional = true; continue; }
+                    scanning = false;
                 }
 
                 Token paramName = consume(XTokenType::IDENTIFIER, "Expect parameter name.");
@@ -1857,7 +2104,7 @@ private:
                         runtimeError("Optional parameter default value must be a literal.");
                 }
 
-                parameters.push_back({ paramName.lexeme, paramType, isOptional, isAssigns, defaultValue });
+                parameters.push_back({ paramName.lexeme, paramType, isOptional, isAssigns, defaultValue, isByRef });
 
 
             } while (match({ XTokenType::COMMA }));
@@ -1917,8 +2164,18 @@ private:
                 std::vector<Param> parameters;
                 if (!check(XTokenType::RIGHT_PAREN)) {
                     do {
+                        bool isByRef   = false;
                         bool isOptional = false;
-                        if (match({ XTokenType::XOPTIONAL })) { isOptional = true; }
+                        bool isAssigns  = false;
+
+                        bool scanning = true;
+                        while (scanning) {
+                            if (match({ XTokenType::BYREF }))      { isByRef = true; continue; }
+                            if (match({ XTokenType::ASSIGNS }))    { isAssigns = true; continue; }
+                            if (match({ XTokenType::XOPTIONAL }))  { isOptional = true; continue; }
+                            scanning = false;
+                        }
+
                         Token param = consume(XTokenType::IDENTIFIER, "Expect parameter name.");
                         std::string paramType = "";
                         if (match({ XTokenType::AS })) {
@@ -1933,7 +2190,7 @@ private:
                             else
                                 runtimeError("Optional parameter default value must be a literal.");
                         }
-                        parameters.push_back({ param.lexeme, paramType, isOptional, false, defaultValue });
+                        parameters.push_back({ param.lexeme, paramType, isOptional, isAssigns, defaultValue, isByRef });
                     } while (match({ XTokenType::COMMA }));
                 }
                 consume(XTokenType::RIGHT_PAREN, "Expect ')' after parameters.");
@@ -2137,23 +2394,27 @@ private:
     {
         std::shared_ptr<Expr> expr = orExpr();
 
-        /* --- Assigns-style call: only for *global* routines --------- */
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpr>(expr)) {
-            if (bin->op == BinaryOp::EQ) {
-                if (auto call = std::dynamic_pointer_cast<CallExpr>(bin->left)) {
-                    /*  ChangeValue(…) = rhs   →   ChangeValue(…, rhs)   */
-                    if (std::dynamic_pointer_cast<VariableExpr>(call->callee)) {
-                        auto args = call->arguments;      // make a copy
-                        args.push_back(bin->right);       // append RHS
-                        return std::make_shared<CallExpr>(call->callee, args);
-                    }
-                    /* callee is *not* a VariableExpr (e.g. obj.Method)
-                       → leave it untouched so comparisons like
-                       instance.function() = False work normally         */
-                }
-            }
-        }
-        /* ------------------------------------------------------------ */
+        /*
+          IMPORTANT:
+          ---------
+          In earlier versions, we attempted to support Xojo-style "Assigns"
+          (e.g.  Foo(i) = v  →  Foo(i, v)) by rewriting *any* equality
+          expression whose left-hand side was a CallExpr.
+
+          That was too broad because BASIC also uses '=' for equality in
+          conditional expressions.
+
+          Example that must remain a comparison:
+              If data(i) = key Then
+
+          The old rewrite would turn this into an array set:
+              data(i, key)
+          which mutates the array and makes the condition always truthy.
+
+          The Assigns / array-element-set rewrite is now handled at the
+          statement level (see Parser::declaration) so comparisons inside
+          expressions stay comparisons.
+        */
 
         // --- Compound assignment (+=, -=, *=, /=) ---
         if ( match({
@@ -2192,16 +2453,6 @@ private:
             Token equals = previous();
             std::shared_ptr<Expr> value = assignment();
 
-            /* ── assigns-style call  ──────────────────────────────
-               e.g.   ChangeValue(5,4) = 10
-               ► translate to a CallExpr with the RHS appended             */
- 
-            if (auto call = std::dynamic_pointer_cast<CallExpr>(expr)) {
-                auto args = call->arguments;
-                args.push_back(value);                 // append := parameter
-                return std::make_shared<CallExpr>(call->callee, args);
-            }
- 
             /* existing rules for “x = …” */
             if (auto var = std::dynamic_pointer_cast<VariableExpr>(expr))
                 return std::make_shared<AssignmentExpr>(var->name, value);
@@ -2694,33 +2945,41 @@ BuiltinFn wrapPluginFunction(void *funcPtr,
             New block: turn an ObjArray into a flat C array (double[])
             ---------------------------------------------------------------- */
             if (pType == "array") {
+                // Array parameters are passed to plugins as a raw pointer.
+                // If the argument is a CrossBasic ObjArray, we flatten it to a temporary double[].
+                // IMPORTANT: libffi expects the *address of the pointer* as the argument value.
                 if (holds<std::shared_ptr<ObjArray>>(args[i])) {
                     auto src = getVal<std::shared_ptr<ObjArray>>(args[i]);
 
-                    /* build a temporary buffer */
                     size_t n = src->elements.size();
-                    double *buf = new double[n];              // ➋ allocate
+                    double *buf = (n > 0) ? new double[n] : nullptr;
                     for (size_t k = 0; k < n; ++k) {
                         const Value &v = src->elements[k];
                         buf[k] =  holds<double>(v) ? getVal<double>(v)
                                 : holds<int>(v)    ? (double)getVal<int>(v)
                                 : /* otherwise */    0.0;
                     }
-                    heapAlloc.push_back(buf);                 // ➌ remember to free
-                    argValues[i] = buf;
-                    continue;                                 // ➍ done with this arg
+
+                    heapAlloc.push_back(buf);   // remember to free at end of call
+                    ptrStorage[i] = buf;        // store pointer so we can pass &ptrStorage[i]
+                    argValues[i] = &ptrStorage[i];
+                    continue;
                 }
 
-                // /* fall-back for the old pointer/int behaviour */
-                // if (holds<void*>(args[i]))
-                //     argValues[i] = &getVal<void*>(args[i]);
-                // else if (holds<int>(args[i])) {
-                //     intStorage[i] = getVal<int>(args[i]);
-                //     argValues[i] = &intStorage[i];
-                // } else
-                //     runtimeError("Plugin expects an array pointer.");
-                // continue;
-            }else if (pType == "string")
+                // Fallback: caller supplied an explicit pointer/int.
+                if (holds<void *>(args[i])) {
+                    ptrStorage[i] = getVal<void *>(args[i]);
+                    argValues[i] = &ptrStorage[i];
+                    continue;
+                }
+                if (holds<int>(args[i])) {
+                    ptrStorage[i] = reinterpret_cast<void *>((intptr_t)getVal<int>(args[i]));
+                    argValues[i] = &ptrStorage[i];
+                    continue;
+                }
+
+                runtimeError("Plugin expects array/ObjArray or array pointer/int @" + std::to_string(i));
+            } else if (pType == "string")
             {
                 if (!holds<std::string>(args[i]))
                     runtimeError("Plugin expects string @" + std::to_string(i));
@@ -2769,8 +3028,18 @@ BuiltinFn wrapPluginFunction(void *funcPtr,
             }
             else
             {
-                // treat anything else as an integer handle
-                intStorage[i] = holds<int>(args[i]) ? getVal<int>(args[i]) : 0;
+                // Plugin-class parameters are passed as their integer handle.
+                // The VM argument may be:
+                //   - an ObjInstance (plugin object), or
+                //   - a raw integer handle.
+                if (holds<std::shared_ptr<ObjInstance>>(args[i])) {
+                    auto inst = getVal<std::shared_ptr<ObjInstance>>(args[i]);
+                    intStorage[i] = (int)(intptr_t)inst->pluginInstance;
+                } else if (holds<int>(args[i])) {
+                    intStorage[i] = getVal<int>(args[i]);
+                } else {
+                    intStorage[i] = 0;
+                }
                 argValues[i] = &intStorage[i];
             }
 
@@ -2916,7 +3185,7 @@ BuiltinFn wrapPluginFunctionForDeclare(const std::vector<Param>& params, const s
 #include <stdio.h>
 
 #ifdef _WIN32
-    const std::string PATH_SEPARATOR = "\\";
+    const std::string PATH_SEPARATOR = "\\\\";
     #define LOAD_LIBRARY(path) LoadLibraryA((path).c_str())
     #define GET_PROC_ADDRESS(module, proc) GetProcAddress(module, proc)
     typedef HMODULE LIB_HANDLE;
@@ -3533,9 +3802,61 @@ private:
             compileExpr(group->expression, chunk);
         }
         else if (auto call = std::dynamic_pointer_cast<CallExpr>(expr)) {
+            // If the callee is a known script function with ByRef parameters, compile
+            // matching arguments as references (OP_GET_REF) instead of values.
+            std::vector<Param> calleeParams;
+            bool haveSig = false;
+
+            if (auto calleeVar = std::dynamic_pointer_cast<VariableExpr>(call->callee)) {
+                std::string calleeName = toLower(calleeVar->name);
+                Value raw;
+                if (vm.environment->tryGetRaw(calleeName, raw)) {
+                    // Direct function
+                    if (holds<std::shared_ptr<ObjFunction>>(raw)) {
+                        auto fn = getVal<std::shared_ptr<ObjFunction>>(raw);
+                        if (fn) {
+                            calleeParams = fn->params;
+                            haveSig = true;
+                        }
+                    }
+                    // Overloads
+                    else if (holds<std::vector<std::shared_ptr<ObjFunction>>>(raw)) {
+                        auto fns = getVal<std::vector<std::shared_ptr<ObjFunction>>>(raw);
+                        int argc = (int)call->arguments.size();
+                        for (auto& f : fns) {
+                            if (!f) continue;
+                            int minArgs = 0;
+                            for (auto& p : f->params) {
+                                if (!p.optional) minArgs++;
+                            }
+                            if (argc >= minArgs && argc <= (int)f->params.size()) {
+                                calleeParams = f->params;
+                                haveSig = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             compileExpr(call->callee, chunk);
-            for (auto arg : call->arguments)
-                compileExpr(arg, chunk);
+
+            for (size_t i = 0; i < call->arguments.size(); i++) {
+                bool wantByRef = haveSig && (i < calleeParams.size()) && calleeParams[i].byRef;
+
+                if (wantByRef) {
+                    // ByRef arguments must be addressable variables for now.
+                    if (auto v = std::dynamic_pointer_cast<VariableExpr>(call->arguments[i])) {
+                        int nameConst = addConstantString(chunk, toLower(v->name));
+                        emitWithOperand(chunk, OP_GET_REF, nameConst);
+                    } else {
+                        runtimeError("ByRef argument must be a variable name.");
+                    }
+                } else {
+                    compileExpr(call->arguments[i], chunk);
+                }
+            }
+
             emitWithOperand(chunk, OP_CALL, call->arguments.size());
         }
         else if (auto arrLit = std::dynamic_pointer_cast<ArrayLiteralExpr>(expr)) {
@@ -3657,34 +3978,52 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             break;
         }
         case OP_SUB: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) - getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad - bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for subtraction.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) - getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad - bd);
+    }
+    break;
+}
         case OP_MUL: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) * getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad * bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for multiplication.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) * getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad * bd);
+    }
+    break;
+}
         case OP_DIV: {
-            Value b = pop(vm), a = pop(vm);
-            double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-            double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-            vm.stack.push_back(ad / bd);
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for division.");
+
+    double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+    double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+    vm.stack.push_back(ad / bd);
+    break;
+}
         case OP_NEGATE: {
             Value v = pop(vm);
             if (holds<int>(v))
@@ -3695,67 +4034,103 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             break;
         }
         case OP_POW: {
-            Value b = pop(vm), a = pop(vm);
-            double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-            double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-            vm.stack.push_back(std::pow(ad, bd));
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for exponentiation.");
+
+    double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+    double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+    vm.stack.push_back(std::pow(ad, bd));
+    break;
+}
         case OP_MOD: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) % getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(std::fmod(ad, bd));
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for modulo.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) % getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(std::fmod(ad, bd));
+    }
+    break;
+}
         case OP_LT: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) < getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad < bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for comparison.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) < getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad < bd);
+    }
+    break;
+}
         case OP_LE: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) <= getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad <= bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for comparison.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) <= getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad <= bd);
+    }
+    break;
+}
         case OP_GT: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) > getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad > bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for comparison.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) > getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad > bd);
+    }
+    break;
+}
         case OP_GE: {
-            Value b = pop(vm), a = pop(vm);
-            if (holds<int>(a) && holds<int>(b))
-                vm.stack.push_back(getVal<int>(a) >= getVal<int>(b));
-            else {
-                double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
-                double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
-                vm.stack.push_back(ad >= bd);
-            }
-            break;
-        }
+    Value b = pop(vm), a = pop(vm);
+
+    const bool aNum = holds<int>(a) || holds<double>(a);
+    const bool bNum = holds<int>(b) || holds<double>(b);
+    if (!aNum || !bNum)
+        runtimeError("VM: Operands must be numbers for comparison.");
+
+    if (holds<int>(a) && holds<int>(b))
+        vm.stack.push_back(getVal<int>(a) >= getVal<int>(b));
+    else {
+        double ad = holds<double>(a) ? getVal<double>(a) : static_cast<double>(getVal<int>(a));
+        double bd = holds<double>(b) ? getVal<double>(b) : static_cast<double>(getVal<int>(b));
+        vm.stack.push_back(ad >= bd);
+    }
+    break;
+}
         case OP_EQ: {
             Value b = pop(vm), a = pop(vm);
         
@@ -3912,6 +4287,24 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             }
             break;
         }
+
+case OP_GET_REF: {
+    int nameIndex = chunk.code[ip++];
+    if (nameIndex < 0 || nameIndex >= (int)chunk.constants.size())
+        runtimeError("VM: Invalid constant index for ref name.");
+    Value nameVal = chunk.constants[nameIndex];
+    if (!holds<std::string>(nameVal))
+        runtimeError("VM: Ref name must be a string.");
+    std::string name = getVal<std::string>(nameVal);
+
+    // ByRef requires an addressable variable cell.
+    Value* cell = vm.environment->getCell(name);
+    auto r = std::make_shared<ObjRef>();
+    r->target = cell;
+    vm.stack.push_back(Value(r));
+    debugLog("VM: Loaded ref for variable: " + name);
+    break;
+}
         case OP_SET_GLOBAL: {
             int nameIndex = chunk.code[ip++];
             if (nameIndex < 0 || nameIndex >= (int)chunk.constants.size())
@@ -4433,20 +4826,50 @@ Value runVM(VM& vm, const ObjFunction::CodeChunk& chunk) {
             Value methodNameVal = chunk.constants[methodNameIndex];
             if (!holds<std::string>(methodNameVal))
                 runtimeError("VM: Method name must be a string.");
-            Value methodVal = pop(vm);
-            if (!holds<std::shared_ptr<ObjFunction>>(methodVal))
+
+            // Method being attached (scripted methods are ObjFunction)
+            Value newMethodVal = pop(vm);
+            if (!holds<std::shared_ptr<ObjFunction>>(newMethodVal))
                 runtimeError("VM: Method must be a function.");
+
             Value classVal = pop(vm);
             if (!holds<std::shared_ptr<ObjClass>>(classVal))
                 runtimeError("VM: No class found for method.");
+
             auto klass = getVal<std::shared_ptr<ObjClass>>(classVal);
             std::string methodName = toLower(getVal<std::string>(methodNameVal));
-            if (klass->methods.find(methodName) != klass->methods.end()) {
-                // Overload handling omitted.
+
+            auto it = klass->methods.find(methodName);
+            if (it == klass->methods.end()) {
+                // First definition of this method name.
+                klass->methods[methodName] = newMethodVal;
             }
             else {
-                klass->methods[methodName] = methodVal;
+                // Existing method: create/extend an overload set resolved by arg-count.
+                Value &existing = it->second;
+                auto newFn = getVal<std::shared_ptr<ObjFunction>>(newMethodVal);
+
+                if (holds<std::shared_ptr<ObjFunction>>(existing)) {
+                    auto oldFn = getVal<std::shared_ptr<ObjFunction>>(existing);
+                    std::vector<std::shared_ptr<ObjFunction>> overloads;
+                    overloads.push_back(oldFn);
+                    overloads.push_back(newFn);
+                    existing = Value(overloads);
+                }
+                else if (holds<std::vector<std::shared_ptr<ObjFunction>>>(existing)) {
+                    auto overloads = getVal<std::vector<std::shared_ptr<ObjFunction>>>(existing);
+                    overloads.push_back(newFn);
+                    existing = Value(overloads);
+                }
+                else if (holds<BuiltinFn>(existing)) {
+                    // Keeping behavior strict here avoids surprising changes with plugin/builtin methods.
+                    runtimeError("VM: Cannot overload builtin method '" + methodName + "' with a scripted method.");
+                }
+                else {
+                    runtimeError("VM: Unsupported method type for overload set: " + methodName);
+                }
             }
+
             vm.stack.push_back(Value(klass));
             break;
         }

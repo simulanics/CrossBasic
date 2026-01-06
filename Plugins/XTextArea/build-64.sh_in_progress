@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# build-64.sh
+# Cross-platform build script for XTextArea
+# - Windows (MSYS2/MinGW): produces XTextArea.dll
+# - Linux: produces XTextArea.so (GTK3)
+# - macOS: produces XTextArea.dylib (Cocoa)
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+if [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win32"* ]]; then
+  echo "Building XTextArea.dll (Windows)..."
+  g++ -shared -o XTextArea.dll XTextArea.cpp -static -static-libgcc -static-libstdc++ -Wl,--subsystem,windows -mwindows -pthread
+  echo "Build complete: XTextArea.dll"
+  exit 0
+fi
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  echo "Building XTextArea.dylib (macOS/Cocoa)..."
+  g++ -std=c++17 -shared -fPIC -x objective-c++ -o XTextArea.dylib XTextArea.cpp -framework Cocoa -pthread
+  echo "Build complete: XTextArea.dylib"
+  exit 0
+fi
+
+echo "Building XTextArea.so (Linux/GTK3)..."
+GTK_CFLAGS="$(pkg-config --cflags gtk+-3.0)"
+GTK_LIBS="$(pkg-config --libs gtk+-3.0)"
+g++ -std=c++17 -shared -fPIC -o XTextArea.so XTextArea.cpp -pthread ${GTK_CFLAGS} ${GTK_LIBS}
+echo "Build complete: XTextArea.so"

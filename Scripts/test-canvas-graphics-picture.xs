@@ -4,7 +4,7 @@
 
 ' Create our main window
 Dim win As New XWindow
-win.Title = "XCanvas / XGraphics / XPicture Demo"
+win.Title  = "XCanvas / XGraphics / XPicture Demo"
 win.Width  = 650
 win.Height = 500
 
@@ -13,106 +13,128 @@ win.Height = 500
 '------------------------------------------------------------------------
 Print("Loaded XPicture Dimensions")
 Dim pic As New XPicture
-pic.Load("ico.png")    ' ← replace with a valid path
-'------------------------------------------------------------------------
-'  4) Save a snapshot of our picture object back out to disk
-'------------------------------------------------------------------------
-print(str(pic.width) + ", " + str(pic.height))
+pic.Load("./Scripts/ico.png")    ' replace with a valid path
+
+Print(Str(pic.Width) + ", " + Str(pic.Height))
 pic.Save("canvas_snapshot.png")
+
 '------------------------------------------------------------------------
 '  2) Create and position an XCanvas
 '------------------------------------------------------------------------
 Dim canvas As New XCanvas
-canvas.Parent = win.Handle
-canvas.Graphics.Antialias = True
 canvas.Left   = 20
 canvas.Top    = 20
 canvas.Width  = 600
 canvas.Height = 400
+canvas.Parent = win.Handle
 
+canvas.Graphics.Antialias = True
+
+' Optional: assign the picture as the canvas backdrop (drawn automatically before Paint)
+canvas.Backdrop = pic
 
 '------------------------------------------------------------------------
-'  3) Handle the Paint event to draw shapes & the picture
+'  2b) Prepare some polygon points (XPoints)
 '------------------------------------------------------------------------
+Dim poly As New XPoints
+poly.Add(500, 300)
+poly.Add(550, 350)
+poly.Add(450, 350)
 
-Sub CanvasPaint(g as XGraphics) as Boolean
+Dim poly2 As New XPoints
+poly2.Add(0, 0)
+poly2.Add(50, 0)
+poly2.Add(25, 50)
+
+'------------------------------------------------------------------------
+'  3) Paint + Mouse handlers
+'------------------------------------------------------------------------
+Function CanvasPaint(g as XGraphics) As Boolean
   g.Antialias = True
-  ' Draw a blue diagonal line
   Print("PAINTING")
-  g.clear()
+
+  g.Clear()
+
+  ' If you set canvas.Backdrop = pic, the plugin already draws the backdrop.
+  ' Keeping this is fine (just redundant), or remove it.
+  g.DrawPicture(pic, 0, 0, canvas.Width, canvas.Height)
+
   g.PenSize = 3
   g.DrawingColor = &c0000FF
   g.DrawLine(0, 0, canvas.Width, canvas.Height)
-  
-  ' Draw a red rectangle outline
+
   g.DrawingColor = &cFF0000
   g.DrawRect(50, 50, 150, 100)
-  
-  ' Fill a green oval
+
+  g.DrawingColor = &cFF0000
+  g.FillRect(250, 200, 100, 150)
+
+  g.DrawingColor = &cFFFF00
+  g.DrawOval(400, 50, 100, 150)
+
   g.DrawingColor = &c00FF00
   g.FillOval(250, 50, 100, 100)
-  
-  ' Draw some black text
+
+  g.PenSize = 5
+  g.DrawingColor = &c00FFFF
+  g.DrawPolygon(poly2)
+
+  g.DrawingColor = &cFF00FF
+  g.FillPolygon(poly)
+
   g.DrawingColor = &c000000
   g.FontName = "Arial"
   g.FontSize = 30
   g.DrawText("Hello, XCanvas!", 20, canvas.Height - 80)
-  
-  ' Draw our loaded picture in the lower right
-  Dim picW As Integer = 100
-  Dim picH As Integer = 100
-  Dim px   As Integer = canvas.Width - picW - 10
-  Dim py   As Integer = canvas.Height - picH - 10
 
-  g.DrawPicture(pic, 0, 0, canvas.Width, canvas.height)
-  return true
-  
-End Sub
+  Return True
+End Function
 
 Sub MouseDown(x as Integer, y as Integer)
-  Print("MouseDown")
+  Print("MouseDown at x=" + Str(x) + " y=" + Str(y))
 End Sub
 
 Sub MouseUp(x as Integer, y as Integer)
-  Print("MouseUp")
+  Print("MouseUp at x=" + Str(x) + " y=" + Str(y))
 End Sub
 
-Function MouseMove(x as Integer, y as Integer)
-  Print("x=" + str(x) + " y=" + str(y))
+Sub MouseMove(x as Integer, y as Integer)
+  Print("x=" + Str(x) + " y=" + Str(y))
 End Sub
 
-Sub DoubleClick()
-  Print("DoubleClicked")
+Sub DoubleClick(x as Integer, y as Integer)
+  Print("DoubleClicked at x=" + Str(x) + " y=" + Str(y))
 End Sub
 
 Sub TerminateApplication()
   Quit()
 End Sub
 
+'------------------------------------------------------------------------
+'  4) Hook events
+'------------------------------------------------------------------------
 AddHandler(canvas.Paint, AddressOf(CanvasPaint))
 AddHandler(canvas.MouseDown, AddressOf(MouseDown))
 AddHandler(canvas.MouseUp, AddressOf(MouseUp))
 AddHandler(canvas.MouseMove, AddressOf(MouseMove))
 AddHandler(canvas.DoubleClick, AddressOf(DoubleClick))
-AddHandler(win.Closing, Addressof(TerminateApplication))
-
+AddHandler(win.Closing, AddressOf(TerminateApplication))
 
 ' Show the window and start the event loop
 win.Show()
 canvas.Invalidate()
 
 Print("XPicture Canvas.Backdrop Dimensions")
-var gg as XPicture = Canvas.Backdrop
-print(str(gg.width) + ", " + str(gg.height))
-gg.save("canvas_image.png")
+Var gg As XPicture = canvas.Backdrop
+Print(Str(gg.Width) + ", " + Str(gg.Height))
+gg.Save("canvas_image.png")
 
 Print("XGraphics Canvas.Graphics Dimensions")
-var cg as XGraphics = Canvas.Graphics
-print(str(Canvas.width) + ", " + str(Canvas.height))
-print(str(cg.width) + ", " + str(cg.height))
-cg.savetofile("canvas-graphics.png")
+Var cg As XGraphics = canvas.Graphics
+Print(Str(canvas.Width) + ", " + Str(canvas.Height))
+Print(Str(cg.Width) + ", " + Str(cg.Height))
+cg.SaveToFile("canvas-graphics.png")
 
-
-while True
- DoEvents(1)
+While True
+  DoEvents(1)
 Wend

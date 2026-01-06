@@ -56,6 +56,24 @@ static void EnsurePicBindings()
         pPic_Graphics_GET=(PicGfxGetFn)GetProcAddress(gPicLib,"XPicture_Graphics_GET");
 }
 
+
+/* ────── optional linkage to XPoints.dll ───────────────────────── */
+static HMODULE  gPtsLib = nullptr;
+typedef int (__cdecl *PtsCountFn)(int);
+typedef const PointF* (__cdecl *PtsDataFn)(int);
+static PtsCountFn pPts_Count_GET = nullptr;
+static PtsDataFn  pPts_DataPointer_GET = nullptr;
+
+static void EnsurePtsBindings()
+{
+    if (pPts_Count_GET && pPts_DataPointer_GET) return;
+    gPtsLib = LoadLibraryA("XPoints.dll");
+    if (gPtsLib) {
+        pPts_Count_GET = (PtsCountFn)GetProcAddress(gPtsLib, "XPoints_Count_GET");
+        pPts_DataPointer_GET = (PtsDataFn)GetProcAddress(gPtsLib, "XPoints_DataPointer_GET");
+    }
+}
+
 /* ────── per-instance data ───────────────────────────────────────── */
 struct GfxInst {
     bool        isBitmap;
@@ -102,6 +120,7 @@ static void CleanupAll()
     gInst.clear();
     if (gGdiInit){ GdiplusShutdown(gGdiToken); gGdiInit=false; }
     if (gPicLib)  FreeLibrary(gPicLib);
+    if (gPtsLib)  FreeLibrary(gPtsLib);
 }
 
 /* ────── PUBLIC API ─────────────────────────────────────────────── */
@@ -156,6 +175,16 @@ XPLUGIN_API int XGraphics_ConstructorPicture(int w,int hgt,int depthBits)
     ApplyAA(i);
 
     gInst[h]=i; return h;
+}
+
+
+// NOTE: CrossBasic plugin-class constructors are invoked with *zero* arguments.
+// Provide a safe 0-arg constructor for "New XGraphics" scenarios.
+XPLUGIN_API int XGraphics_Constructor0()
+{
+    // Create a tiny offscreen surface by default. Consumers can still
+    // use XCanvas.Graphics or other APIs that return a window-attached graphics.
+    return XGraphics_ConstructorPicture(1, 1, 32);
 }
 
 /* ---- destructor -------------------------------------------------- */
@@ -242,41 +271,46 @@ XPLUGIN_API void XGraphics_FillOval(int h,int x,int y,int w,int hgt)
     it->second->gfx->FillEllipse(&b,x,y,w,hgt);
 }
 
-/* ---- new: polygon drawing -------------------------------------- */
-XPLUGIN_API void XGraphics_DrawPolygon(int h, const PointF* pts, int count)
+/* ---- polygon drawing (XPoints) ----------------------------------- */
+/*
+    XPoints is a small helper object that owns an internal `PointF[]` buffer.
+    This avoids the ambiguity of passing raw numeric arrays (x,y,x,y,...) and
+    needing a separate count parameter.
+*/
+XPLUGIN_API void XGraphics_DrawPolygon(int h, int ptsH)
 {
     std::lock_guard<std::mutex> lk(gMx);
-    auto it=gInst.find(h); if(it==gInst.end() || count<2) return;
-    Pen p(it->second->color,(REAL)it->second->penSize);
+    auto it = gInst.find(h);
+    if (it == gInst.end()) return;
+
+    EnsurePtsBindings();
+    if (!pPts_Count_GET || !pPts_DataPointer_GET) return;
+
+    int count = pPts_Count_GET(ptsH);
+    if (count < 2) return;
+
+    const PointF* pts = pPts_DataPointer_GET(ptsH);
+    if (!pts) return;
+
+    Pen p(it->second->color, (REAL)it->second->penSize);
     it->second->gfx->DrawPolygon(&p, pts, count);
 }
-// XPLUGIN_API void XGraphics_FillPolygon(int h, const PointF* pts, int count)
-// {
-//     std::lock_guard<std::mutex> lk(gMx);
-//     auto it=gInst.find(h); if(it==gInst.end() || count<2) return;
-//     SolidBrush b(it->second->color);
-//     it->second->gfx->FillPolygon(&b, pts, count);
-// }
-XPLUGIN_API void XGraphics_FillPolygon(int h, const PointF* pts, int count)
+
+XPLUGIN_API void XGraphics_FillPolygon(int h, int ptsH)
 {
-    /* ---------- diagnostics ------------------------------------ */
-    std::cout << "[FillPolygon] h=" << h
-              << "  pts=" << (void*)pts
-              << "  count=" << count << "\n";
-
-    if (pts) {
-        for (int i = 0; i < count; ++i) {
-            std::cout << "   p" << i << " = (" << pts[i].X
-                      << "," << pts[i].Y << ")\n";
-        }
-    } else {
-        std::cout << "   *** pts == nullptr ***\n";
-    }
-    std::cout << std::flush;
-    /* ----------------------------------------------------------- */
-
     std::lock_guard<std::mutex> lk(gMx);
-    auto it = gInst.find(h);          if (it == gInst.end() || count < 2) return;
+    auto it = gInst.find(h);
+    if (it == gInst.end()) return;
+
+    EnsurePtsBindings();
+    if (!pPts_Count_GET || !pPts_DataPointer_GET) return;
+
+    int count = pPts_Count_GET(ptsH);
+    if (count < 2) return;
+
+    const PointF* pts = pPts_DataPointer_GET(ptsH);
+    if (!pts) return;
+
     SolidBrush b(it->second->color);
     it->second->gfx->FillPolygon(&b, pts, count);
 }
@@ -489,8 +523,8 @@ static Method meths[]={
   { "FillRect",     (void*)XGraphics_FillRect,     5, {"integer","integer","integer","integer","integer"},                   "void"    },
   { "DrawOval",     (void*)XGraphics_DrawOval,     5, {"integer","integer","integer","integer","integer"},                   "void"    },
   { "FillOval",     (void*)XGraphics_FillOval,     5, {"integer","integer","integer","integer","integer"},                   "void"    },
-  { "DrawPolygon",  (void*)XGraphics_DrawPolygon,  3, {"integer","array","integer"},                                        "void"    },
-  { "FillPolygon",  (void*)XGraphics_FillPolygon,  3, {"integer","array","integer"},                                        "void"    },
+  { "DrawPolygon",  (void*)XGraphics_DrawPolygon,  2, {"integer","XPoints"},                                                "void"    },
+  { "FillPolygon",  (void*)XGraphics_FillPolygon,  2, {"integer","XPoints"},                                                "void"    },
   { "DrawPicture",  (void*)XGraphics_DrawPicture,  6, {"integer","XPicture","integer","integer","integer","integer"},        "void"    },
   { "DrawText",     (void*)XGraphics_DrawText,     4, {"integer","string","integer","integer"},                              "void"    },
   { "SaveToFile",   (void*)XGraphics_SaveToFile,   2, {"integer","string"},                                                  "boolean" },
@@ -499,7 +533,7 @@ static Method meths[]={
 
 static ClassDef classDef={
     "XGraphics", sizeof(GfxInst),
-    (void*)XGraphics_Constructor,
+    (void*)XGraphics_Constructor0,
     props, sizeof(props)/sizeof(props[0]),
     meths, sizeof(meths)/sizeof(meths[0]),
     nullptr,0

@@ -149,6 +149,15 @@ XPLUGIN_API int XPicture_Constructor(int width,int height,int depthBits)
     return picH;
 }
 
+
+// NOTE: CrossBasic plugin-class constructors are invoked with *zero* arguments.
+// Provide a safe 0-arg constructor for "New XPicture" scenarios.
+XPLUGIN_API int XPicture_Constructor0()
+{
+    // Default to a small 1x1 32-bit surface. The picture can be resized via Load/Draw or future APIs.
+    return XPicture_Constructor(1, 1, 32);
+}
+
 //------------------------------------------------------------------------------
 // Close
 XPLUGIN_API void XPicture_Close(int h) {
@@ -253,7 +262,7 @@ static ClassEntry methods[] = {
 static ClassDefinition classDef = {
     "XPicture",
     sizeof(PicInst),
-    (void*)XPicture_Constructor,
+    (void*)XPicture_Constructor0,
     props, sizeof(props)/sizeof(props[0]),
     methods, sizeof(methods)/sizeof(methods[0]),
     nullptr, 0

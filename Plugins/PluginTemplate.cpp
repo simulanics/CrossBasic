@@ -45,7 +45,7 @@ extern "C" {
     } PluginEntry;
 
     // Sample exported function: adds two integers.
-    XPLUGIN_API int addtwonumbers(int a, int b) {
+    XPLUGIN_API double addtwonumbers(double a, double b) {
         return a + b;
     }
 

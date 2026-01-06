@@ -2,14 +2,14 @@
 setlocal
 
 :: Compile resource file
-windres ./XCompile/xcompile.rc -O coff -o ./XCompile/xcompile.res
+windres ./XCompile-SRC/xcompile.rc -O coff -o ./XCompile-SRC/xcompile.res
 if %ERRORLEVEL% NEQ 0 (
     echo Resource compilation failed! Check xcompile.rc for errors.
     exit /b %ERRORLEVEL%
 )
 
 :: Compile crossbasic.cpp with metadata
-g++ -s -static -m64 -o xcompile.exe ./XCompile/xcompile.cpp ./XCompile/xcompile.res -static-libgcc -static-libstdc++ -O3 -march=native -mtune=native 2> error.log
+g++ -s -static -m64 -o xcompile.exe ./XCompile-SRC/xcompile.cpp ./XCompile-SRC/xcompile.res -static-libgcc -static-libstdc++ -O3 -march=native -mtune=native 2> error.log
 
 :: Check if compilation was successful
 if %ERRORLEVEL% NEQ 0 (

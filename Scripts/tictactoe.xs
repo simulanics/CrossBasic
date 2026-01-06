@@ -18,7 +18,7 @@ win.HasMinimizeButton  = True
 win.HasMaximizeButton  = False
 win.HasFullScreenButton = False
 win.HasTitleBar        = True
-win.SetIcon("ico.png")
+win.SetIcon("./scripts/ico.png")
 
 AddHandler(win.Closing, AddressOf(OnQuit))
 
@@ -101,7 +101,7 @@ Sub ButtonPressed(sender as XButton)
   ' win?
   If CheckWin(currentPlayer) Then
     print("player wins")
-    win.MessageBox("Player " + currentPlayer + " wins!")
+    win.MessageBox("Winner!", "Player " + currentPlayer + " wins!", 0)
     ResetBoard()
     Return 0
   End If

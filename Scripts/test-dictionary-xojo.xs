@@ -26,7 +26,7 @@ Class Dictionary
   End Function
 
   // SetItem method: updates value if key exists, or adds a new pair
-  Sub SetItem(key As String, value As Variant)
+  Sub Value(key As String, Assigns value As Variant)
     Dim found As Boolean = False
     For i As Integer = 0 To self.Count() - 1
       If data(i) = key Then
@@ -42,7 +42,7 @@ Class Dictionary
   End Sub
 
   // GetItem method: returns value for a key, or "nil" if key not found
-  Function GetItem(key As String) As String
+  Function Value(key As String) As Variant
     For i As Integer = 0 To data.Count() - 1
       If data(i) = key Then
         Return vals(i)
@@ -66,14 +66,14 @@ End Class
 Dim dt As New Dictionary
 
 // Add several key–value pairs to the dictionary
-dt.SetItem("name", "Alice")
-dt.SetItem("age", 30)
-dt.SetItem("city", "Wonderland")
+dt.Value("name") = "Alice"
+dt.Value("age") = 30
+dt.Value("city") = "Wonderland"
 
 // Retrieve and display specific values
-Print("Name: " + dt.GetItem("name"))
-Print("Age: " + Str(dt.GetItem("age")))
-Print("City: " + dt.GetItem("city"))
+Print("Name: " + dt.Value("name"))
+Print("Age: " + Str(dt.Value("age")))
+Print("City: " + dt.Value("city"))
 
 // Print total number of entries
 Print("Total items: " + Str(dt.Count()))
@@ -81,7 +81,7 @@ Print("Total items: " + Str(dt.Count()))
 // Enumerate all keys and print their associated values
 Dim keys() As String = dt.Keys()
 For i As Integer = 0 To keys.Count() - 1
-  Print("Key: " + keys(i) + ", Value: " + Str(dt.GetItem(keys(i))))
+  Print("Key: " + keys(i) + ", Value: " + Str(dt.Value(keys(i))))
 Next
 
 Print("Dictionary test completed.")

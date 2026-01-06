@@ -25,4 +25,4 @@ For i As Integer = 1 To 10 Step 2
   sum += i
 Next i
 
-Print("Sum = " + sum.ToString)  ' Outputs "Sum = 26"
+Print("Sum = " + sum.ToString)  ' Outputs "Sum = 25"

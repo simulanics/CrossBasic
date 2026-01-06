@@ -278,8 +278,10 @@ print(str(x))
 
 // Plugin function calls
 print(sayhello("matt"))
-var xtv as integer = addtwonumbers(1.1735, 3.14159)
+var xtv as variant = addtwonumbers(5,4)
+var ztv as Double = 1.1735 + 3.14159
 print(str(xtv))
+print(str(ztv))
 
 // UTF-8 test
 print("UTF-8 Support")

@@ -53,12 +53,44 @@
   #define strdup _strdup
 #else
   #define XPLUGIN_API __attribute__((visibility("default")))
+
+#if !defined(_WIN32)
+// Attempt to resolve XWindow_GetNativeHandle(windowId) at runtime.
+typedef void* (*XWindow_GetNativeHandle_Proc)(int);
+static XWindow_GetNativeHandle_Proc gGetParentNativeHandle = nullptr;
+
+static void* resolveParentNativeHandle(int windowId) {
+  if (gGetParentNativeHandle) return gGetParentNativeHandle(windowId);
+#if defined(__APPLE__)
+  const char* candidates[] = {"libXWindow.dylib","XWindow.dylib","XWindow.bundle","XWindow"};
+#else
+  const char* candidates[] = {"libXWindow.so","XWindow.so","XWindow"};
+#endif
+  void* lib = nullptr;
+  for (auto* name : candidates) { lib = dlopen(name, RTLD_LAZY); if (lib) break; }
+  if (!lib) lib = dlopen(nullptr, RTLD_LAZY);
+  if (lib) gGetParentNativeHandle = (XWindow_GetNativeHandle_Proc)dlsym(lib, "XWindow_GetNativeHandle");
+  if (!gGetParentNativeHandle) return nullptr;
+  return gGetParentNativeHandle(windowId);
+}
+#endif // !defined(_WIN32)
+
 #endif
 
 // ─── webview single-header ───────────────────────────────────────────────────
 #define WEBVIEW_DEBUG 0
 #define WEBVIEW_IMPLEMENTATION
 #include "webview.h"
+
+// --- Platform UI headers ---
+#if defined(__linux__)
+  #include <dlfcn.h>
+  #include <gtk/gtk.h>
+#elif defined(__APPLE__)
+  #include <dlfcn.h>
+  #include <Cocoa/Cocoa.h>
+#endif
+
 
 // Normalize success code across webview variants
 #ifndef WEBVIEW_SUCCESS

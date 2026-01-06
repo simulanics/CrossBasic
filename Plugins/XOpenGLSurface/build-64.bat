@@ -1,1 +1,1 @@
-g++ XOpenGLSurface.cpp -O3 -s -shared -static -Wl,-Bdynamic -lglew32 -lglfw3 -Wl,-Bstatic -lopengl32 -lgdi32 -luser32 -o XOpenGLSurface.dll
+g++ XOpenGLSurface.cpp -O3 -s -shared -static -Wl,-Bdynamic -lglew32 -lglfw3 -Wl,-Bstatic -lopengl32 -lgdi32 -luser32 -lws2_32 -o XOpenGLSurface.dll
